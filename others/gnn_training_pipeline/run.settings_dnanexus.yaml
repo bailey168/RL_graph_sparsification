@@ -1,0 +1,331 @@
+#################################################################################################################################################################################################
+######################################################################### RUN SETTINGS FOR REGRESSION DATASETS ######################################################################
+#################################################################################################################################################################################################
+
+# Grid search parameters - all combinations will be tested
+grid_search:
+  # DSST datasets
+  dsst_custom_fc25:
+    dropout_rates: [0.3]
+    weight_decays: [0.01]
+    layers_nums: [2]
+    num_sub_kernels: [2, 3, 5, 7, 9, 11]  # Only used if model_type is QGRN
+    lrs: [0.005]
+  dsst_custom_fc100:
+    dropout_rates: [0.1, 0.3, 0.5, 0.7]
+    weight_decays: [0.001, 0.01, 0.1]
+    layers_nums: [2, 3, 4]
+    num_sub_kernels: [2, 3, 5, 7, 9, 11]  # Only used if model_type is QGRN
+    lrs: [0.001, 0.005, 0.01]
+  dsst_custom_mind:
+    dropout_rates: [0.1, 0.3, 0.5, 0.7]
+    weight_decays: [0.001, 0.01, 0.1]
+    layers_nums: [2, 3, 4]
+    num_sub_kernels: [2, 3, 5, 7, 9, 11]
+    lrs: [0.0001, 0.001, 0.01]
+
+  # GF datasets
+  gf_custom_fc25:
+    dropout_rates: [0.1, 0.3, 0.5, 0.7]
+    weight_decays: [0.001, 0.01, 0.1]
+    layers_nums: [2, 3, 4]
+    num_sub_kernels: [2, 3, 5, 7, 9, 11]
+    lrs: [0.0001, 0.001, 0.01]
+  gf_custom_fc100:
+    # dropout_rates: [0.1, 0.3, 0.5, 0.7]
+    # weight_decays: [0.001, 0.01, 0.1]
+    # layers_nums: [2, 3, 4]
+    # num_sub_kernels: [2, 3, 5, 7, 9, 11]
+    # lrs: [0.001, 0.005, 0.01]
+    dropout_rates: [0.7]
+    weight_decays: [0.01]
+    layers_nums: [4]
+    num_sub_kernels: [2, 3, 5, 7, 9, 11]
+    lrs: [0.005]
+  gf_custom_mind:
+    dropout_rates: [0.1, 0.3, 0.5, 0.7]
+    weight_decays: [0.001, 0.01, 0.1]
+    layers_nums: [2, 3, 4]
+    num_sub_kernels: [2, 3, 5, 7, 9, 11]
+    lrs: [0.0001, 0.001, 0.01]
+
+  # PAL datasets
+  pal_custom_fc25:
+    dropout_rates: [0.1, 0.3, 0.5, 0.7]
+    weight_decays: [0.001, 0.01, 0.1]
+    layers_nums: [2, 3, 4]
+    num_sub_kernels: [2, 3, 5, 7, 9, 11]
+    lrs: [0.0001, 0.001, 0.01]
+  pal_custom_fc100:
+    dropout_rates: [0.1, 0.3, 0.5, 0.7]
+    weight_decays: [0.001, 0.01, 0.1]
+    layers_nums: [2, 3, 4]
+    num_sub_kernels: [2, 3, 5, 7, 9, 11]
+    lrs: [0.0001, 0.001, 0.01]
+  pal_custom_mind:
+    dropout_rates: [0.1, 0.3, 0.5, 0.7]
+    weight_decays: [0.001, 0.01, 0.1]
+    layers_nums: [2, 3, 4]
+    num_sub_kernels: [2, 3, 5, 7, 9, 11]
+    lrs: [0.0001, 0.001, 0.01]
+
+  # TMT datasets
+  tmt_custom_fc25:
+    dropout_rates: [0.1, 0.3, 0.5, 0.7]
+    weight_decays: [0.001, 0.01, 0.1]
+    layers_nums: [2, 3, 4]
+    num_sub_kernels: [2, 3, 5, 7, 9, 11]
+    lrs: [0.0001, 0.001, 0.01]
+  tmt_custom_fc100:
+    dropout_rates: [0.1, 0.3, 0.5, 0.7]
+    weight_decays: [0.001, 0.01, 0.1]
+    layers_nums: [2, 3, 4]
+    num_sub_kernels: [2, 3, 5, 7, 9, 11]
+    lrs: [0.0001, 0.001, 0.01]
+  tmt_custom_mind:
+    dropout_rates: [0.1, 0.3, 0.5, 0.7]
+    weight_decays: [0.001, 0.01, 0.1]
+    layers_nums: [2, 3, 4]
+    num_sub_kernels: [2, 3, 5, 7, 9, 11]
+    lrs: [0.0001, 0.001, 0.01]
+
+
+epochs:
+  dsst_custom_fc25:
+    - 200
+  dsst_custom_fc100:
+    - 200
+  dsst_custom_mind:
+    - 200
+
+  gf_custom_fc25:
+    - 200
+  gf_custom_fc100:
+    - 300
+  gf_custom_mind:
+    - 200
+
+  pal_custom_fc25:
+    - 200
+  pal_custom_fc100:
+    - 200
+  pal_custom_mind:
+    - 200
+
+  tmt_custom_fc25:
+    - 200
+  tmt_custom_fc100:
+    - 200
+  tmt_custom_mind:
+    - 200
+
+# Number of runs for statistical significance
+runs:
+  dsst_custom_fc25:
+    - 3
+  dsst_custom_fc100:
+    - 3
+  dsst_custom_mind:
+    - 3
+
+  gf_custom_fc25:
+    - 3
+  gf_custom_fc100:
+    - 3
+  gf_custom_mind:
+    - 3
+
+  pal_custom_fc25:
+    - 3
+  pal_custom_fc100:
+    - 3
+  pal_custom_mind:
+    - 3
+
+  tmt_custom_fc25:
+    - 3
+  tmt_custom_fc100:
+    - 3
+  tmt_custom_mind:
+    - 3
+
+
+# Early stopping configurations
+early_stopping:
+  dsst_custom_fc25:
+    - enabled: true
+      patience: 25
+      min_delta: 0.0001
+      restore_best_weights: true
+      verbose: true
+      monitor: "r2"
+  dsst_custom_fc100:
+    - enabled: true
+      patience: 25
+      min_delta: 0.0001
+      restore_best_weights: true
+      verbose: true
+      monitor: "r2"
+  dsst_custom_mind:
+    - enabled: true
+      patience: 25
+      min_delta: 0.0001
+      restore_best_weights: true
+      verbose: true
+      monitor: "r2"
+
+  gf_custom_fc25:
+    - enabled: true
+      patience: 25
+      min_delta: 0.0001
+      restore_best_weights: true
+      verbose: true
+      monitor: "r2"
+  gf_custom_fc100:
+    - enabled: true
+      patience: 25
+      min_delta: 0.0001
+      restore_best_weights: true
+      verbose: true
+      monitor: "r2"
+  gf_custom_mind:
+    - enabled: true
+      patience: 25
+      min_delta: 0.0001
+      restore_best_weights: true
+      verbose: true
+      monitor: "r2"
+
+  pal_custom_fc25:
+    - enabled: true
+      patience: 25
+      min_delta: 0.0001
+      restore_best_weights: true
+      verbose: true
+      monitor: "r2"
+  pal_custom_fc100:
+    - enabled: true
+      patience: 25
+      min_delta: 0.0001
+      restore_best_weights: true
+      verbose: true
+      monitor: "r2"
+  pal_custom_mind:
+    - enabled: true
+      patience: 25
+      min_delta: 0.0001
+      restore_best_weights: true
+      verbose: true
+      monitor: "r2"
+
+  tmt_custom_fc25:
+    - enabled: true
+      patience: 25
+      min_delta: 0.0001
+      restore_best_weights: true
+      verbose: true
+      monitor: "r2"
+  tmt_custom_fc100:
+    - enabled: true
+      patience: 25
+      min_delta: 0.0001
+      restore_best_weights: true
+      verbose: true
+      monitor: "r2"
+  tmt_custom_mind:
+    - enabled: true
+      patience: 25
+      min_delta: 0.0001
+      restore_best_weights: true
+      verbose: true
+      monitor: "r2"
+
+# Learning rate scheduler configurations
+schedulers:
+  dsst_custom_fc25:
+    - scheduler: "warmup_cosine"
+      scheduler_params:
+        num_warmup_steps: 870
+        num_training_steps: 17400  # epochs * batches_per_epoch
+        num_cycles: 0.5
+        last_epoch: -1
+  dsst_custom_fc100:
+    - scheduler: "warmup_cosine"
+      scheduler_params:
+        num_warmup_steps: 870
+        num_training_steps: 17400  # epochs * batches_per_epoch
+        num_cycles: 0.5
+        last_epoch: -1
+  dsst_custom_mind:
+    - scheduler: "warmup_cosine"
+      scheduler_params:
+        num_warmup_steps: 870
+        num_training_steps: 17400  # epochs * batches_per_epoch
+        num_cycles: 0.5
+        last_epoch: -1
+
+  gf_custom_fc25:
+    - scheduler: "warmup_cosine"
+      scheduler_params:
+        num_warmup_steps: 1030
+        num_training_steps: 20600
+        num_cycles: 0.5
+        last_epoch: -1
+  gf_custom_fc100:
+    - scheduler: "warmup_cosine"
+      scheduler_params:
+        num_warmup_steps: 1030
+        num_training_steps: 30900
+        num_cycles: 0.5
+        last_epoch: -1
+  gf_custom_mind:
+    - scheduler: "warmup_cosine"
+      scheduler_params:
+        num_warmup_steps: 1030
+        num_training_steps: 20600
+        num_cycles: 0.5
+        last_epoch: -1
+
+  pal_custom_fc25:
+    - scheduler: "warmup_cosine"
+      scheduler_params:
+        num_warmup_steps: 6990
+        num_training_steps: 139800
+        num_cycles: 0.5
+        last_epoch: -1
+  pal_custom_fc100:
+    - scheduler: "warmup_cosine"
+      scheduler_params:
+        num_warmup_steps: 6990
+        num_training_steps: 139800
+        num_cycles: 0.5
+        last_epoch: -1
+  pal_custom_mind:
+    - scheduler: "warmup_cosine"
+      scheduler_params:
+        num_warmup_steps: 6990
+        num_training_steps: 139800
+        num_cycles: 0.5
+        last_epoch: -1
+
+  tmt_custom_fc25:
+    - scheduler: "warmup_cosine"
+      scheduler_params:
+        num_warmup_steps: 6770
+        num_training_steps: 135400
+        num_cycles: 0.5
+        last_epoch: -1
+  tmt_custom_fc100:
+    - scheduler: "warmup_cosine"
+      scheduler_params:
+        num_warmup_steps: 6770
+        num_training_steps: 135400
+        num_cycles: 0.5
+        last_epoch: -1
+  tmt_custom_mind:
+    - scheduler: "warmup_cosine"
+      scheduler_params:
+        num_warmup_steps: 6770
+        num_training_steps: 135400
+        num_cycles: 0.5
+        last_epoch: -1

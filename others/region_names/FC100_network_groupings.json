@@ -1,0 +1,43 @@
+{
+  "DMNp": {
+    "color": "firebrick",
+    "nodes": ["IC5", "IC10", "IC11", "IC19", "IC36"]
+  },
+  "DMNa": {
+    "color": "red",
+    "nodes": ["IC7", "IC13", "IC21", "IC28", "IC52", 
+              "IC55"]
+  },
+  "Sub&Cereb": {
+    "color": "black",
+    "nodes": ["IC38", "IC17", "IC23", "IC53", "IC54"]
+  },
+  "VIS": {
+    "color": "purple",
+    "nodes": ["IC1", "IC3", "IC16", "IC8", "IC14"]
+  },
+  "VAN": {
+    "color": "darkgreen",
+    "nodes": ["IC2", "IC15", "IC37", "IC45", "IC47"]
+  },
+  "DAN": {
+    "color": "lightgreen",
+    "nodes": ["IC4", "IC18", "IC27", "IC34", "IC39",
+              "IC40", "IC41", "IC42"]
+  },
+  "SMN": {
+    "color": "blue",
+    "nodes": ["IC6", "IC20", "IC22", "IC30", "IC32", 
+              "IC35"]
+  },
+  "FPN": {
+    "color": "orange",
+    "nodes": ["IC12", "IC24", "IC25", "IC26", "IC29",
+              "IC31", "IC44", "IC46", "IC49"]
+  },
+  "TempPar": {
+    "color": "yellow",
+    "nodes": ["IC9", "IC33", "IC43", "IC48", "IC50",
+              "IC51"]
+  }
+}

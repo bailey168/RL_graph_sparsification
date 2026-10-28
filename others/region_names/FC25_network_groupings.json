@@ -1,0 +1,30 @@
+{
+  "Default Mode": {
+    "color": "red",
+    "nodes": ["IC20", "IC14", "IC13", "IC9", "IC7", "IC1"]
+  },
+  "STR": {
+    "color": "pink",
+    "nodes": ["IC18"]
+  },
+  "CRB": {
+    "color": "black",
+    "nodes": ["IC15"]
+  },
+  "Visual": {
+    "color": "purple",
+    "nodes": ["IC19", "IC8", "IC4", "IC2"]
+  },
+  "Attention": {
+    "color": "green",
+    "nodes": ["IC3"]
+  },
+  "Motor": {
+    "color": "blue",
+    "nodes": ["IC17", "IC12", "IC11", "IC10"]
+  },
+  "Frontoparietal": {
+    "color": "orange",
+    "nodes": ["IC16", "IC6", "IC5", "IC21"]
+  }
+}

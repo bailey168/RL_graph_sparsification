@@ -1,0 +1,351 @@
+###########################################################################################################################################################################################
+###################################################################### DSST REGRESSION DATASET ###################################################################
+###########################################################################################################################################################################################
+
+# Custom Dataset for Regression:
+#     task: regression (continuous scores)
+#     max_node_degree: varies (will depend on your FC graphs)
+#     node_features: varies (will depend on your graph processing)
+#     pos_exists: False (brain connectivity graphs typically don't use positional features)
+#     total_dataset: varies (based on your processed data)
+
+# FC25 datasets (21 nodes)
+dsst_custom_fc25:
+  dataset_group: custom
+  dataset_name: custom_dataset_selfloops_True_edgeft_None_norm_True
+  layers_num: None
+  out_dim: 1  # Single continuous output for regression
+  num_sub_kernels: 7
+  in_channels: 21  # FC25 has 21 nodes
+  embedding_dim: 8
+  hidden_channels: 32
+  out_channels: 32
+  pos_descr_dim: -1  # No positional descriptors
+  edge_attr_dim: 1 
+  
+  # Demographics configuration
+  include_demo: True
+  demo_dim: 6  # age(1) + sex(1) + assessment_centre_onehot_drop_first(3) + head motion(1) = 6
+
+  # Model specific params - optimized for regression
+  # GraphConv
+  graph_out_sf: 2
+  graph_hidden_sf: 1
+  
+  # GCNConv & QGRN
+  gcn_hidden_sf: 4
+  gcn_out_sf: 2
+  
+  # GATv2Conv
+  gatv2_hidden_heads: 4
+  gatv2_out_sf: 1
+  gatv2_hidden_sf: 2
+  
+  # Dataset location - no download URLs since it's local
+  download_url: {}  # Empty since your data is local
+
+# FC100 datasets (55 nodes)
+dsst_custom_fc100:
+  dataset_group: custom
+  dataset_name: custom_dataset_selfloops_True_edgeft_None_norm_True
+  layers_num: None
+  out_dim: 1  # Single continuous output for regression
+  num_sub_kernels: 7
+  in_channels: 55  # FC100 has 55 nodes
+  embedding_dim: 32
+  hidden_channels: 64
+  out_channels: 32
+  pos_descr_dim: -1  # No positional descriptors
+  edge_attr_dim: 1 
+  
+  # Demographics configuration
+  include_demo: True
+  demo_dim: 6  # age(1) + sex(1) + assessment_centre_onehot_drop_first(3) + head motion(1) = 6
+
+  # Model specific params - optimized for regression
+  # GraphConv
+  graph_out_sf: 2
+  graph_hidden_sf: 1
+  
+  # GCNConv & QGRN
+  gcn_hidden_sf: 4
+  gcn_out_sf: 2
+  
+  # GATv2Conv
+  gatv2_hidden_heads: 4
+  gatv2_out_sf: 1
+  gatv2_hidden_sf: 2
+  
+  # Dataset location - no download URLs since it's local
+  download_url: {}  # Empty since your data is local
+
+dsst_custom_mind:
+  dataset_group: custom
+  dataset_name: custom_dataset_selfloops_True_edgeft_None_norm_True
+  layers_num: None
+  out_dim: 1  # Single continuous output for regression
+  num_sub_kernels: 7
+  in_channels: 68  # MIND has 68 nodes
+  embedding_dim: 32
+  hidden_channels: 64
+  out_channels: 32
+  pos_descr_dim: -1  # No positional descriptors
+  edge_attr_dim: 1 
+  
+  # Demographics configuration
+  include_demo: True
+  demo_dim: 5  # age(1) + sex(1) + assessment_centre_onehot_drop_first(3) = 5
+
+  # Model specific params - optimized for regression
+  # GraphConv
+  graph_out_sf: 2
+  graph_hidden_sf: 1
+  
+  # GCNConv & QGRN
+  gcn_hidden_sf: 4
+  gcn_out_sf: 2
+  
+  # GATv2Conv
+  gatv2_hidden_heads: 4
+  gatv2_out_sf: 1
+  gatv2_hidden_sf: 2
+  
+  # Dataset location - no download URLs since it's local
+  download_url: {}  # Empty since your data is local
+
+###########################################################################################################################################################################################
+###################################################################### GF REGRESSION DATASET ###################################################################
+###########################################################################################################################################################################################
+
+gf_custom_fc25:
+  dataset_group: custom
+  dataset_name: custom_dataset_selfloops_True_edgeft_None_norm_True
+  layers_num: None
+  out_dim: 1
+  num_sub_kernels: 7
+  in_channels: 21
+  embedding_dim: 16
+  hidden_channels: 64
+  out_channels: 32
+  pos_descr_dim: -1
+  edge_attr_dim: 1 
+
+  include_demo: True
+  demo_dim: 6
+
+  graph_out_sf: 2
+  graph_hidden_sf: 1
+  gcn_hidden_sf: 4
+  gcn_out_sf: 2
+  gatv2_hidden_heads: 4
+  gatv2_out_sf: 1
+  gatv2_hidden_sf: 2
+  download_url: {}
+
+gf_custom_fc100:
+  dataset_group: custom
+  dataset_name: custom_dataset_selfloops_True_edgeft_None_norm_True
+  layers_num: None
+  out_dim: 1
+  num_sub_kernels: 7
+  in_channels: 55
+  embedding_dim: 32
+  hidden_channels: 64
+  out_channels: 32
+  pos_descr_dim: -1
+  edge_attr_dim: 1 
+
+  include_demo: True
+  demo_dim: 6
+
+  graph_out_sf: 2
+  graph_hidden_sf: 1
+  gcn_hidden_sf: 4
+  gcn_out_sf: 2
+  gatv2_hidden_heads: 4
+  gatv2_out_sf: 1
+  gatv2_hidden_sf: 2
+  download_url: {}
+
+gf_custom_mind:
+  dataset_group: custom
+  dataset_name: custom_dataset_selfloops_True_edgeft_None_norm_True
+  layers_num: None
+  out_dim: 1
+  num_sub_kernels: 7
+  in_channels: 68
+  embedding_dim: 32
+  hidden_channels: 64
+  out_channels: 32
+  pos_descr_dim: -1
+  edge_attr_dim: 1 
+
+  include_demo: True
+  demo_dim: 5
+
+  graph_out_sf: 2
+  graph_hidden_sf: 1
+  gcn_hidden_sf: 4
+  gcn_out_sf: 2
+  gatv2_hidden_heads: 4
+  gatv2_out_sf: 1
+  gatv2_hidden_sf: 2
+  download_url: {}
+
+###########################################################################################################################################################################################
+###################################################################### PAL REGRESSION DATASET ###################################################################
+###########################################################################################################################################################################################
+
+pal_custom_fc25:
+  dataset_group: custom
+  dataset_name: custom_dataset_selfloops_True_edgeft_None_norm_True
+  layers_num: None
+  out_dim: 1
+  num_sub_kernels: 7
+  in_channels: 21
+  embedding_dim: 16
+  hidden_channels: 64
+  out_channels: 32
+  pos_descr_dim: -1
+  edge_attr_dim: 1 
+
+  include_demo: True
+  demo_dim: 6
+
+  graph_out_sf: 2
+  graph_hidden_sf: 1
+  gcn_hidden_sf: 4
+  gcn_out_sf: 2
+  gatv2_hidden_heads: 4
+  gatv2_out_sf: 1
+  gatv2_hidden_sf: 2
+  download_url: {}
+
+pal_custom_fc100:
+  dataset_group: custom
+  dataset_name: custom_dataset_selfloops_True_edgeft_None_norm_True
+  layers_num: None
+  out_dim: 1
+  num_sub_kernels: 7
+  in_channels: 55
+  embedding_dim: 16
+  hidden_channels: 64
+  out_channels: 32
+  pos_descr_dim: -1
+  edge_attr_dim: 1 
+
+  include_demo: True
+  demo_dim: 6
+
+  graph_out_sf: 2
+  graph_hidden_sf: 1
+  gcn_hidden_sf: 4
+  gcn_out_sf: 2
+  gatv2_hidden_heads: 4
+  gatv2_out_sf: 1
+  gatv2_hidden_sf: 2
+  download_url: {}
+
+pal_custom_mind:
+  dataset_group: custom
+  dataset_name: custom_dataset_selfloops_True_edgeft_None_norm_True
+  layers_num: None
+  out_dim: 1
+  num_sub_kernels: 7
+  in_channels: 68
+  embedding_dim: 32
+  hidden_channels: 64
+  out_channels: 32
+  pos_descr_dim: -1
+  edge_attr_dim: 1 
+
+  include_demo: True
+  demo_dim: 5
+
+  graph_out_sf: 2
+  graph_hidden_sf: 1
+  gcn_hidden_sf: 4
+  gcn_out_sf: 2
+  gatv2_hidden_heads: 4
+  gatv2_out_sf: 1
+  gatv2_hidden_sf: 2
+  download_url: {}
+
+###########################################################################################################################################################################################
+###################################################################### TMT REGRESSION DATASET ###################################################################
+###########################################################################################################################################################################################
+
+tmt_custom_fc25:
+  dataset_group: custom
+  dataset_name: custom_dataset_selfloops_True_edgeft_None_norm_True
+  layers_num: None
+  out_dim: 1
+  num_sub_kernels: 7
+  in_channels: 21
+  embedding_dim: 16
+  hidden_channels: 64
+  out_channels: 32
+  pos_descr_dim: -1
+  edge_attr_dim: 1 
+
+  include_demo: True
+  demo_dim: 6
+
+  graph_out_sf: 2
+  graph_hidden_sf: 1
+  gcn_hidden_sf: 4
+  gcn_out_sf: 2
+  gatv2_hidden_heads: 4
+  gatv2_out_sf: 1
+  gatv2_hidden_sf: 2
+  download_url: {}
+
+tmt_custom_fc100:
+  dataset_group: custom
+  dataset_name: custom_dataset_selfloops_True_edgeft_None_norm_True
+  layers_num: None
+  out_dim: 1
+  num_sub_kernels: 7
+  in_channels: 55
+  embedding_dim: 16
+  hidden_channels: 64
+  out_channels: 32
+  pos_descr_dim: -1
+  edge_attr_dim: 1 
+
+  include_demo: True
+  demo_dim: 6
+  
+  graph_out_sf: 2
+  graph_hidden_sf: 1
+  gcn_hidden_sf: 4
+  gcn_out_sf: 2
+  gatv2_hidden_heads: 4
+  gatv2_out_sf: 1
+  gatv2_hidden_sf: 2
+  download_url: {}
+
+tmt_custom_mind:
+  dataset_group: custom
+  dataset_name: custom_dataset_selfloops_True_edgeft_None_norm_True
+  layers_num: None
+  out_dim: 1
+  num_sub_kernels: 7
+  in_channels: 68
+  embedding_dim: 32
+  hidden_channels: 64
+  out_channels: 32
+  pos_descr_dim: -1
+  edge_attr_dim: 1 
+
+  include_demo: True
+  demo_dim: 5
+
+  graph_out_sf: 2
+  graph_hidden_sf: 1
+  gcn_hidden_sf: 4
+  gcn_out_sf: 2
+  gatv2_hidden_heads: 4
+  gatv2_out_sf: 1
+  gatv2_hidden_sf: 2
+  download_url: {}

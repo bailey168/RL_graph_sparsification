@@ -1,0 +1,65 @@
+# Top-K FC graph sparsification baseline with a fixed GCN.
+# Any key can be overridden from the CLI, e.g. --set training.lr=0.001
+
+paths:
+  data_dir: /scratch/bng/cartbind/data/UKB_new_data/combined_data_no_outliers   # combined_data_{TEST}_no_outliers.csv
+  eid_dir: /scratch/bng/cartbind/code/MIND_models/scaling_law_splits            # {TEST}/{TEST}_all_eids.txt
+  region_dir: region_names
+  output_dir: outputs/topk
+
+# FC21 = UKB FC25 (21 nodes), FC55 = UKB FC100 (55 nodes).
+# Region files keep the original CSV column names, e.g. "FC25 (IC1-IC2)".
+fc_types:
+  FC21:
+    regions_file: FC21_regions.txt
+    num_nodes: 21
+  FC55:
+    regions_file: FC55_regions.txt
+    num_nodes: 55
+
+tests:
+  GF: p20016_i2
+  PAL: p20197_i2
+  DSST: p23324_i2
+  TMT: p6350_i2
+
+demographics:
+  numeric: [p21003_i2, p25741_i2]   # age, head motion
+  categorical: [p31, p54_i2]        # sex, assessment centre
+
+split:
+  val_frac: 0.15
+  test_frac: 0.15
+  seed: 42
+  use_eid_file: true
+
+graph:
+  rank_by: raw            # raw | standardized  -> top-K by |value|
+  edge_value: raw         # raw | standardized  -> signed value carried by kept edges
+  self_loop_weight: 1.0
+
+sweep:
+  keep_fracs: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+  seeds: [42]
+
+model:
+  embedding_dim: 32
+  hidden_channels: 64
+  gnn_num_layers: 2
+  classifier_hidden_dims: [32]
+  node_dropout: 0.3
+  classifier_dropout: 0.3
+  pooling: attention      # attention | mean
+  include_demo: true
+  demo_embed_dim: 8
+
+training:
+  batch_size: 512
+  max_epochs: 200
+  lr: 0.005
+  weight_decay: 0.01
+  warmup_epochs: 10
+  early_stop_patience: 15
+  early_stop_min_delta: 0.0
+  compile: false
+  num_workers: 0

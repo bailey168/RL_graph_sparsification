@@ -1,0 +1,109 @@
+###########################################################################################################################################################################################
+######################################################################### DATASET SPLITS FOR REGRESSION ######################################################################
+###########################################################################################################################################################################################
+
+# DSST splits
+dsst_custom_fc25:
+  train: 44368
+  test: 11092
+  batch_size: 512
+
+dsst_custom_fc100:
+  train: 44368
+  test: 11092 
+  batch_size: 512
+
+dsst_custom_mind:
+  train: 44368
+  test: 11092 
+  batch_size: 512
+
+# GF splits
+gf_custom_fc25:
+  train: 52236
+  test: 13060
+  batch_size: 512
+
+gf_custom_fc100:
+  train: 52236
+  test: 13060
+  batch_size: 512
+
+gf_custom_mind:
+  train: 52236
+  test: 13060 
+  batch_size: 512
+
+# PAL splits
+pal_custom_fc25:
+  train: 44720
+  test: 11180
+  batch_size: 512
+
+pal_custom_fc100:
+  train: 44720
+  test: 11180
+  batch_size: 512
+
+pal_custom_mind:
+  train: 44720
+  test: 11180
+  batch_size: 512
+
+# TMT splits
+tmt_custom_fc25:
+  train: 43281
+  test: 10821
+  batch_size: 512
+
+tmt_custom_fc100:
+  train: 43281
+  test: 10821
+  batch_size: 512
+
+tmt_custom_mind:
+  train: 43281
+  test: 10821
+  batch_size: 512
+
+
+
+# dsst_custom_fc:
+#   train: 19420
+#   test: 4855 
+#   batch_size: 64
+
+# dsst_custom_mind:
+#   train: 19420
+#   test: 4855 
+#   batch_size: 64
+
+# gf_custom_fc:
+#   train: 27181
+#   test: 6796 
+#   batch_size: 64
+
+# gf_custom_mind:
+#   train: 27181
+#   test: 6796 
+#   batch_size: 64
+
+# pal_custom_fc:
+#   train: 19593
+#   test: 4899 
+#   batch_size: 64
+
+# pal_custom_mind:
+#   train: 19593
+#   test: 4899 
+#   batch_size: 64
+
+# tmt_custom_fc:
+#   train: 18689
+#   test: 4673 
+#   batch_size: 64
+
+# tmt_custom_mind:
+#   train: 18689
+#   test: 4673 
+#   batch_size: 64
