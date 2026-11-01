@@ -34,13 +34,15 @@ split:
   use_eid_file: true
 
 graph:
-  rank_by: raw            # raw | standardized  -> top-K by |value|
-  edge_value: raw         # raw | standardized  -> signed value carried by kept edges
+  edge_value: standardized  # raw | standardized  -> signed value carried by kept edges (z-score fit on pre-sparsified train edges)
   self_loop_weight: 1.0
 
 sweep:
   keep_fracs: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
   seeds: [42]
+  # personal: each subject keeps its own top-K by |raw FC|
+  # shared: one edge set for everyone - edges most often in train subjects' personal top-K
+  masks: [personal, shared]
 
 model:
   embedding_dim: 32

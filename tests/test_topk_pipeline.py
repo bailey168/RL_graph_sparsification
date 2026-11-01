@@ -47,17 +47,32 @@ def test_sweep_end_to_end(tmp_path):
 
     out = tmp_path / 'out'
     results = pd.read_csv(out / 'results.csv')
-    assert len(results) == 4  # 2 FC types x 2 keep levels
+    assert len(results) == 8  # 2 FC types x 2 keep levels x 2 masks
     assert set(results['fc']) == {'FC21', 'FC55'}
+    assert set(results['mask']) == {'personal', 'shared'}
     assert not (out / 'failures.csv').exists()
     assert (results[['n_train', 'n_val', 'n_test']].sum(axis=1) == 300).all()
 
-    run_dir = out / 'FC55' / 'GF' / 'keep010' / 'seed42'
+    run_dir = out / 'FC55' / 'GF' / 'personal' / 'keep010' / 'seed42'
     for f in ('metrics.json', 'config.yaml', 'losses.csv', 'test_predictions.csv', 'model.pt', 'edge_retention.npy'):
         assert (run_dir / f).exists(), f
     retention = np.load(run_dir / 'edge_retention.npy')
     assert retention.shape == (1485,)
     assert np.isclose(retention.sum(), 148)  # k = floor(0.1 * 1485) edges kept per subject
+
+    shared_dir = out / 'FC55' / 'GF' / 'shared' / 'keep010' / 'seed42'
+    shared = np.load(shared_dir / 'shared_edges.npy')
+    assert shared.shape == (148,)
+    retention = np.load(shared_dir / 'edge_retention.npy')
+    assert set(np.unique(retention)) == {0.0, 1.0} and retention.sum() == 148
+    assert np.array_equal(np.flatnonzero(retention), np.sort(shared))
+    assert not (run_dir / 'shared_edges.npy').exists()
+
+    # keep=1.0: both masks give the full graph, so results match
+    full = results[results['keep_frac'] == 1.0].set_index(['fc', 'mask'])['test_r2']
+    for fc in ('FC21', 'FC55'):
+        assert np.isclose(full[(fc, 'personal')], full[(fc, 'shared')], atol=1e-5)
+
     for split in ('train', 'val', 'test'):
         assert (out / 'splits' / f'GF_{split}_eids.txt').exists()
 
@@ -65,4 +80,4 @@ def test_sweep_end_to_end(tmp_path):
     proc = run_sweep(tmp_path)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert 'All runs complete' in proc.stdout
-    assert len(pd.read_csv(out / 'results.csv')) == 4
+    assert len(pd.read_csv(out / 'results.csv')) == 8

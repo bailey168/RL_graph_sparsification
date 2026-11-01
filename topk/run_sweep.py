@@ -1,5 +1,8 @@
 """Train/evaluate a fixed GCN on top-K sparsified FC graphs across FC types, tests, keep levels and seeds.
 
+Each keep level is run with a personal mask (every subject keeps their own top-K) and/or a shared
+mask (one top-K edge set derived from the training group, applied to everyone).
+
 Example:
     python topk/run_sweep.py --fc FC21 --tests GF --keep 0.1 1.0 --max-subjects 2000 --max-epochs 3
 """
@@ -23,7 +26,7 @@ from common.config import load_config, snapshot
 from common.data import SPLITS, extract_arrays, load_subject_table, make_split, prepare_splits, save_split
 from common.graphs import build_graphs
 from common.models import build_model
-from topk.sparsify import edge_retention, num_kept_edges, topk_edge_indices
+from topk.sparsify import edge_retention, num_kept_edges, shared_edge_indices, tile_mask, topk_edge_indices
 from common.train import fit
 from common.utils import set_deterministic_training
 
@@ -35,6 +38,8 @@ def parse_args():
     parser.add_argument('--tests', nargs='+', help='Cognitive tests (default: all in config)')
     parser.add_argument('--keep', nargs='+', type=float, help='Keep fractions (default: sweep.keep_fracs)')
     parser.add_argument('--seeds', nargs='+', type=int, help='Training seeds (default: sweep.seeds)')
+    parser.add_argument('--masks', nargs='+', choices=['personal', 'shared'],
+                        help='Mask types (default: sweep.masks)')
     parser.add_argument('--max-subjects', type=int, help='Subsample subjects (smoke tests)')
     parser.add_argument('--max-epochs', type=int, help='Override training.max_epochs')
     parser.add_argument('--overwrite', action='store_true', help='Rerun runs that already have metrics.json')
@@ -42,8 +47,16 @@ def parse_args():
     return parser.parse_args()
 
 
-def run_dir_for(output_dir, fc_type, test, keep_frac, seed):
-    return os.path.join(output_dir, fc_type, test, f'keep{int(round(keep_frac * 100)):03d}', f'seed{seed}')
+def run_dir_for(output_dir, fc_type, test, mask, keep_frac, seed):
+    return os.path.join(output_dir, fc_type, test, mask, f'keep{int(round(keep_frac * 100)):03d}', f'seed{seed}')
+
+
+def select_edges(prepared, keep_frac, mask):
+    """Kept edge indices (N, k) per split, for a personal or shared mask."""
+    if mask == 'personal':
+        return {name: topk_edge_indices(prepared[name]['rank_scores'], keep_frac) for name in SPLITS}, None
+    shared = shared_edge_indices(prepared['train']['rank_scores'], keep_frac)
+    return {name: tile_mask(shared, len(prepared[name]['eids'])) for name in SPLITS}, shared
 
 
 def make_loaders(graphs, batch_size, num_workers, generator):
@@ -54,15 +67,15 @@ def make_loaders(graphs, batch_size, num_workers, generator):
     }
 
 
-def run_one(cfg, fc_type, test, keep_frac, seed, prepared, preprocessors, arrays, run_dir, device):
+def run_one(cfg, fc_type, test, mask, keep_frac, seed, prepared, preprocessors, arrays, run_dir, device):
     graph_cfg, train_cfg = cfg['graph'], cfg['training']
     num_nodes = cfg['fc_types'][fc_type]['num_nodes']
     num_edges = len(arrays['edge_list'])
 
-    graphs, top_idx = {}, {}
+    top_idx, shared = select_edges(prepared, keep_frac, mask)
+    graphs = {}
     for name in SPLITS:
         p = prepared[name]
-        top_idx[name] = topk_edge_indices(p['rank_scores'], keep_frac)
         graphs[name] = build_graphs(p['edge_vals'], top_idx[name], p['demo'], p['y'], p['eids'],
                                     arrays['edge_list'], num_nodes, graph_cfg['self_loop_weight'])
 
@@ -77,11 +90,14 @@ def run_one(cfg, fc_type, test, keep_frac, seed, prepared, preprocessors, arrays
     pd.DataFrame(result['history']).to_csv(os.path.join(run_dir, 'losses.csv'), index_label='epoch')
     pd.DataFrame(result['test_predictions']).to_csv(os.path.join(run_dir, 'test_predictions.csv'), index=False)
     np.save(os.path.join(run_dir, 'edge_retention.npy'), edge_retention(top_idx['train'], num_edges))
+    if shared is not None:
+        np.save(os.path.join(run_dir, 'shared_edges.npy'), shared)
     with open(os.path.join(run_dir, 'config.yaml'), 'w') as f:
-        yaml.safe_dump(snapshot(cfg, fc=fc_type, test=test, keep_frac=keep_frac, seed=seed), f, sort_keys=False)
+        yaml.safe_dump(snapshot(cfg, fc=fc_type, test=test, mask=mask, keep_frac=keep_frac, seed=seed), f,
+                       sort_keys=False)
 
     row = {
-        'fc': fc_type, 'test': test, 'keep_frac': keep_frac,
+        'fc': fc_type, 'test': test, 'mask': mask, 'keep_frac': keep_frac,
         'k_edges': num_kept_edges(num_edges, keep_frac), 'num_edges': num_edges, 'seed': seed,
         'n_train': len(graphs['train']), 'n_val': len(graphs['val']), 'n_test': len(graphs['test']),
         'best_epoch': result['best_epoch'], 'epochs_run': result['epochs_run'],
@@ -107,6 +123,7 @@ def main():
     tests = args.tests or list(cfg['tests'])
     keep_fracs = args.keep or cfg['sweep']['keep_fracs']
     seeds = args.seeds or cfg['sweep']['seeds']
+    masks = args.masks or cfg['sweep']['masks']
 
     output_dir = cfg['paths']['output_dir']
     os.makedirs(output_dir, exist_ok=True)
@@ -116,9 +133,9 @@ def main():
     print(f"Using device: {device}")
 
     for test in tests:
-        pending = [(fc, k, s) for fc in fc_types for k in keep_fracs for s in seeds
+        pending = [(fc, k, m, s) for fc in fc_types for k in keep_fracs for m in masks for s in seeds
                    if args.overwrite or not os.path.exists(
-                       os.path.join(run_dir_for(output_dir, fc, test, k, s), 'metrics.json'))]
+                       os.path.join(run_dir_for(output_dir, fc, test, m, k, s), 'metrics.json'))]
         if not pending:
             print(f"[{test}] All runs complete, skipping")
             continue
@@ -130,7 +147,7 @@ def main():
               f"Test: {len(split_idx['test'])}")
 
         for fc_type in fc_types:
-            fc_pending = [(k, s) for fc, k, s in pending if fc == fc_type]
+            fc_pending = [(k, m, s) for fc, k, m, s in pending if fc == fc_type]
             if not fc_pending:
                 continue
 
@@ -140,18 +157,18 @@ def main():
             os.makedirs(pre_dir, exist_ok=True)
             joblib.dump(preprocessors, os.path.join(pre_dir, 'preprocessors.pkl'))
 
-            for keep_frac, seed in fc_pending:
-                run_dir = run_dir_for(output_dir, fc_type, test, keep_frac, seed)
-                print(f"\n=== {fc_type} | {test} | keep={keep_frac:.2f} | seed={seed} ===")
+            for keep_frac, mask, seed in fc_pending:
+                run_dir = run_dir_for(output_dir, fc_type, test, mask, keep_frac, seed)
+                print(f"\n=== {fc_type} | {test} | {mask} | keep={keep_frac:.2f} | seed={seed} ===")
                 try:
-                    row = run_one(cfg, fc_type, test, keep_frac, seed, prepared, preprocessors,
+                    row = run_one(cfg, fc_type, test, mask, keep_frac, seed, prepared, preprocessors,
                                   arrays, run_dir, device)
                     append_row(results_path, row)
                     print(f"  best_epoch={row['best_epoch']} test R²={row['test_r2']:.4f} "
                           f"R²corr={row['test_r2_corr']:.4f} ({row['minutes']:.1f}m)")
                 except Exception as e:
                     traceback.print_exc()
-                    append_row(failures_path, {'fc': fc_type, 'test': test, 'keep_frac': keep_frac,
+                    append_row(failures_path, {'fc': fc_type, 'test': test, 'mask': mask, 'keep_frac': keep_frac,
                                                'seed': seed, 'error': repr(e)})
                 finally:
                     gc.collect()

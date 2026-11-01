@@ -122,7 +122,7 @@ def save_split(eids, split_idx, out_dir, test):
 def prepare_splits(arrays, split_idx, cfg):
     """Fit preprocessors on train only, and return per-split arrays ready for graph building.
 
-    Per split: 'rank_scores' (N, E) used for top-K, 'edge_vals' (N, E) signed values put on edges,
+    Per split: 'rank_scores' (N, E) = |raw FC| used for top-K, 'edge_vals' (N, E) signed values put on edges,
     'demo' (N, D), 'y' (N,) scaled target, 'eids' (N,).
     """
     demo_cfg = cfg['demographics']
@@ -140,7 +140,7 @@ def prepare_splits(arrays, split_idx, cfg):
 
     preprocessors = {'demo': demo_pre, 'y': y_pre}
 
-    needs_std = 'standardized' in (graph_cfg['rank_by'], graph_cfg['edge_value'])
+    needs_std = graph_cfg['edge_value'] == 'standardized'
     if needs_std:
         edge_pre = StandardScaler()
         edge_pre.fit(arrays['X_raw'][tr])
@@ -152,8 +152,8 @@ def prepare_splits(arrays, split_idx, cfg):
         X_raw = arrays['X_raw'][idx]
         X_std = preprocessors['edge'].transform(X_raw).astype(np.float32) if needs_std else None
         out[name] = {
-            'rank_scores': np.abs(X_std if graph_cfg['rank_by'] == 'standardized' else X_raw),
-            'edge_vals': X_std if graph_cfg['edge_value'] == 'standardized' else X_raw,
+            'rank_scores': np.abs(X_raw),
+            'edge_vals': X_std if needs_std else X_raw,
             'demo': demo_pre.transform(arrays['X_demo'].iloc[idx]).astype(np.float32),
             'y': y_pre.transform(arrays['y'][idx].reshape(-1, 1)).flatten().astype(np.float32),
             'eids': arrays['eids'][idx],

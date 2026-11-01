@@ -19,28 +19,35 @@ def parse_args():
 def main():
     args = parse_args()
     df = pd.read_csv(args.results)
+    if 'mask' not in df:
+        df['mask'] = 'personal'   # results written before shared masks existed
+    df['mask'] = df['mask'].fillna('personal')
     # Keep the latest row per run in case of reruns with --overwrite
-    df = df.drop_duplicates(subset=['fc', 'test', 'keep_frac', 'seed'], keep='last')
+    df = df.drop_duplicates(subset=['fc', 'test', 'mask', 'keep_frac', 'seed'], keep='last')
     os.makedirs(args.out_dir, exist_ok=True)
 
-    agg = (df.groupby(['test', 'fc', 'keep_frac'])[args.metric]
+    agg = (df.groupby(['test', 'fc', 'mask', 'keep_frac'])[args.metric]
              .agg(['mean', 'std', 'count']).reset_index())
     agg.to_csv(os.path.join(args.out_dir, f'{args.metric}_by_keep.csv'), index=False)
 
-    table = agg.pivot_table(index=['test', 'fc'], columns='keep_frac', values='mean')
+    table = agg.pivot_table(index=['test', 'fc', 'mask'], columns='keep_frac', values='mean')
     print(table.round(4).to_string())
 
     tests = list(dict.fromkeys(agg['test']))
     ncols = 2
     nrows = (len(tests) + 1) // ncols
     fig, axes = plt.subplots(nrows, ncols, figsize=(10, 4 * nrows), squeeze=False)
+    colors = {fc: f'C{i}' for i, fc in enumerate(sorted(agg['fc'].unique()))}
+    linestyles = {'personal': '-', 'shared': '--'}
     for ax, test in zip(axes.flat, tests):
-        for fc, sub in agg[agg['test'] == test].groupby('fc'):
+        for (fc, mask), sub in agg[agg['test'] == test].groupby(['fc', 'mask']):
             sub = sub.sort_values('keep_frac')
             x = sub['keep_frac'] * 100
-            ax.plot(x, sub['mean'], marker='o', label=fc)
+            ax.plot(x, sub['mean'], marker='o', color=colors[fc], linestyle=linestyles.get(mask, ':'),
+                    label=f'{fc} {mask}')
             if (sub['count'] > 1).any():
-                ax.fill_between(x, sub['mean'] - sub['std'], sub['mean'] + sub['std'], alpha=0.2)
+                ax.fill_between(x, sub['mean'] - sub['std'], sub['mean'] + sub['std'],
+                                color=colors[fc], alpha=0.2)
         ax.set_title(test)
         ax.set_xlabel('Edges kept (%)')
         ax.set_ylabel(args.metric)
