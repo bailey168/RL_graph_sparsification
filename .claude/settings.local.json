@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import torch, torch_geometric; print\\(torch.__version__, torch_geometric.__version__\\)\")"
+    ]
+  }
+}

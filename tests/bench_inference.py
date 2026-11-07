@@ -6,6 +6,10 @@ import argparse
 import os
 import sys
 import time
+import warnings
+
+# torch_geometric calls torch.jit.script internally at import time; silence the resulting deprecation warning
+warnings.filterwarnings("ignore", message=r".*torch\.jit\.script.*is deprecated", category=FutureWarning)
 
 import numpy as np
 import torch
