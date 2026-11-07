@@ -4,8 +4,8 @@
 paths:
   data_dir: /scratch/bng/cartbind/data/UKB_new_data/combined_data_no_outliers   # combined_data_{TEST}_no_outliers.csv
   eid_dir: /scratch/bng/cartbind/code/MIND_models/scaling_law_splits            # {TEST}/{TEST}_all_eids.txt
-  region_dir: region_names
-  output_dir: outputs/topk
+  region_dir: /scratch/bng/cartbind/code/RL_graph_sparsification/region_names
+  output_dir: /scratch/bng/cartbind/data/RL_outputs/topk
 
 # FC21 = UKB FC25 (21 nodes), FC55 = UKB FC100 (55 nodes).
 # Region files keep the original CSV column names, e.g. "FC25 (IC1-IC2)".
@@ -45,10 +45,10 @@ sweep:
   masks: [personal, shared]
 
 model:
-  embedding_dim: 32
+  embedding_dim: 16
   hidden_channels: 64
-  gnn_num_layers: 2
-  classifier_hidden_dims: [32]
+  gnn_num_layers: 3
+  classifier_hidden_dims: [32, 16]
   node_dropout: 0.3
   classifier_dropout: 0.3
   pooling: attention      # attention | mean
