@@ -1,23 +1,34 @@
-"""Aggregate outputs/topk/results.csv into a table and R²-vs-keep% plots."""
+"""Aggregate {paths.output_dir}/results.csv into a table and R²-vs-keep% plots."""
 import argparse
 import os
+import sys
 
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import pandas as pd
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from common.config import load_config
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Summarize sparsity sweep results")
-    parser.add_argument('--results', default='outputs/topk/results.csv')
-    parser.add_argument('--out-dir', default='outputs/topk/summary')
+    parser.add_argument('--config', default='configs/topk.yaml')
+    parser.add_argument('--set', nargs='*', default=[], metavar='KEY=VALUE', help='Config overrides')
+    parser.add_argument('--results', help='Default: {paths.output_dir}/results.csv')
+    parser.add_argument('--out-dir', help='Default: {paths.output_dir}/summary')
     parser.add_argument('--metric', default='test_r2', help='Column to plot, e.g. test_r2 or test_r2_corr')
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    if args.results is None or args.out_dir is None:
+        output_dir = load_config(args.config, args.set)['paths']['output_dir']
+        args.results = args.results or os.path.join(output_dir, 'results.csv')
+        args.out_dir = args.out_dir or os.path.join(output_dir, 'summary')
     df = pd.read_csv(args.results)
     if 'mask' not in df:
         df['mask'] = 'personal'   # results written before shared masks existed

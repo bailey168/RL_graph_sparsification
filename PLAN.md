@@ -114,7 +114,7 @@ The CLI can override any key (e.g. `--set training.lr=0.001`).
 - Each run appends one row to `outputs/topk/results.csv`: fc, test, keep_frac, k_edges, seed, n_train/val/test, best_epoch, epochs_run, train/val/test R², R²-corr, MAE, RMSE, minutes.
 - Runs that already have `metrics.json` are skipped unless `--overwrite` is passed, so the sweep can resume.
 
-**topk/summarize.py** reads `results.csv` and produces a pivot table (test R² by keep% per FC and test) and a 2×2 figure (one panel per test, R² vs keep%; colour = FC, solid = personal, dashed = shared), saved under `outputs/topk/summary/`.
+**topk/summarize.py** reads `results.csv` and produces a pivot table (test R² by keep% per FC and test) and a 2×2 figure (one panel per test, R² vs keep%; colour = FC, solid = personal, dashed = shared), saved under `{paths.output_dir}/summary/`. It reads `paths.output_dir` from `--config` (default `configs/topk.yaml`, with `--set` overrides like `run_sweep.py`); `--results` / `--out-dir` still override.
 
 ## Verification
 1. `pytest tests/test_graphs.py tests/test_topk.py` (local, synthetic data). The test checks:
@@ -149,8 +149,12 @@ pytest tests                                                      # local sanity
 python topk/run_sweep.py --fc FC21 --tests GF --keep 0.1 1.0 --max-subjects 2000 --max-epochs 3   # smoke
 python topk/run_sweep.py                                       # full sweep from configs/topk.yaml
 python topk/run_sweep.py --set graph.self_loop_weight=0.5 paths.output_dir=outputs/topk_sl05          # variant
-python topk/summarize.py                                       # table + outputs/topk/summary/test_r2_vs_keep.png
+python topk/summarize.py                                       # table + {output_dir}/summary/test_r2_vs_keep.png
+python topk/summarize.py --set paths.output_dir=outputs/topk_sl05                                    # summarize a variant
 ```
+
+## Change (2026-11-09): summarize.py reads paths from config
+- `topk/summarize.py` now takes `--config` and `--set` and defaults `--results` to `{paths.output_dir}/results.csv` and `--out-dir` to `{paths.output_dir}/summary`. Previously it was hardcoded to `outputs/topk/`, which didn't match the config's output dir on scratch.
 
 ## Follow-up Q&A (2026-10-29), no code changes
 - Demographic columns are listed in `configs/topk.yaml` (`demographics.numeric` / `categorical`) and read from the combined CSV. Nothing from `others/region_names` (demo_cols, col_renames data dictionary) needs to be copied.
