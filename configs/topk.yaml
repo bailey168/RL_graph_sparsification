@@ -30,7 +30,8 @@ demographics:
 split:
   val_frac: 0.15
   test_frac: 0.15
-  seed: 42
+  seed: 42            # used for --max-subjects subsampling, and for the split when per_seed is false
+  per_seed: true      # true: each training seed gets its own split (split seed = training seed)
   use_eid_file: true
 
 graph:
@@ -38,10 +39,11 @@ graph:
   self_loop_weight: 1.0
 
 sweep:
-  keep_fracs: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-  seeds: [42]
+  keep_fracs: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]   # 0.0 = self-loops only (demographics-only reference)
+  seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
   # personal: each subject keeps its own top-K by |raw FC|
   # shared: one edge set for everyone - edges most often in train subjects' personal top-K
+  # shared is skipped at keep 0.0 and 1.0 (same graphs as personal); summarize.py reuses the personal rows
   masks: [personal, shared]
 
 model:

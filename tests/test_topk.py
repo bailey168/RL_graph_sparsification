@@ -7,7 +7,9 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from common.data import parse_region_map
-from topk.sparsify import edge_retention, num_kept_edges, shared_edge_indices, tile_mask, topk_edge_indices
+from common.graphs import build_graphs
+from topk.sparsify import (edge_retention, is_redundant, num_kept_edges, shared_edge_indices, tile_mask,
+                           topk_edge_indices)
 
 REGION_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'region_names')
 
@@ -60,3 +62,28 @@ def test_shared_frequency_matches_count(fc21):
     dropped = np.setdiff1d(np.arange(X.shape[1]), idx)
     assert freq[idx].min() >= freq[dropped].max()
     assert len(idx) == k
+
+
+def test_keep_zero_gives_self_loops_only(fc21):
+    edge_list, X = fc21
+    num_nodes, n = 21, X.shape[0]
+    assert num_kept_edges(X.shape[1], 0.0) == 0
+    assert num_kept_edges(X.shape[1], 0.001) == 1   # any positive fraction still keeps >= 1 edge
+    top_idx = topk_edge_indices(np.abs(X), 0.0)
+    assert top_idx.shape == (n, 0)
+    assert shared_edge_indices(np.abs(X), 0.0).shape == (0,)
+    assert np.all(edge_retention(top_idx, X.shape[1]) == 0)
+
+    graphs = build_graphs(X, top_idx, np.zeros((n, 3), dtype=np.float32), np.zeros(n), np.arange(n),
+                          edge_list, num_nodes, self_loop_weight=1.0)
+    for g in graphs:
+        assert g.edge_index.shape == (2, num_nodes)
+        assert (g.edge_index[0] == g.edge_index[1]).all()             # self-loops only
+        assert np.allclose(g.edge_weight.numpy(), 1.0)                # s / deg_i with deg_i = s
+        assert (g.edge_index == graphs[0].edge_index).all()           # identical graph for every subject
+
+
+def test_is_redundant():
+    assert is_redundant('shared', 0.0) and is_redundant('shared', 1.0)
+    assert not is_redundant('shared', 0.5)
+    assert not is_redundant('personal', 0.0) and not is_redundant('personal', 1.0)

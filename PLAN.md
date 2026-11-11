@@ -17,15 +17,15 @@ Step 0 of implementation: copy this plan to `PLAN.md` at the repo root (the user
 | Naming | **FC21** = UKB FC25 (21 nodes, 210 edges, CSV columns `FC25 (ICa-ICb)`); **FC55** = UKB FC100 (55 nodes, 1485 edges, columns `FC100 (...)`). New names are used everywhere in our code and outputs. The CSV column strings are left unchanged. |
 | Data | `/scratch/bng/cartbind/data/UKB_new_data/combined_data_no_outliers/combined_data_{TEST}_no_outliers.csv` (edges, demographics and target in one file). Optional EID list `.../MIND_models/scaling_law_splits/{TEST}/{TEST}_all_eids.txt`. All paths set in YAML. |
 | Targets | GF `p20016_i2`, PAL `p20197_i2`, DSST `p23324_i2`, TMT `p6350_i2` |
-| Split | 70/15/15 train/val/test, `train_test_split(random_state=42)` as in the notebook, fixed across sparsity levels and FC types. Split EIDs are saved for reuse by the RL stage. Missing values raise an error (notebook behaviour). |
-| Sparsification | Two masks are compared (`sweep.masks`). **personal**: each subject keeps `k = max(1, floor(p·E))` edges with the largest **\|raw FC\|** (`np.argpartition`). **shared** (added 2026-10-31): one set of k edges from the train split, applied to every subject. Edges are ranked by **frequency**: how often an edge is in a train subject's personal top-K, with ties broken by mean \|FC\|. One rule per mask, no ranking options (simplified 2026-11-01). |
+| Split | 70/15/15 train/val/test via `train_test_split`, as in the notebook. **Per-seed split (2026-11-10):** split seed = training seed (`split.per_seed: true`), and each seed's split is shared by every keep level, mask and FC type. Split EIDs are saved to `splits/seed{s}/`. **The RL stage uses the seed-0 split.** Missing values raise an error (notebook behaviour). |
+| Sparsification | Two masks are compared (`sweep.masks`). **personal**: each subject keeps `k = max(1, floor(p·E))` edges (`k = 0` at keep 0.0, which leaves self-loops only: the demographics-only reference) with the largest **\|raw FC\|** (`np.argpartition`). **shared** (added 2026-10-31): one set of k edges from the train split, applied to every subject. Edges are ranked by **frequency**: how often an edge is in a train subject's personal top-K, with ties broken by mean \|FC\|. One rule per mask, no ranking options (simplified 2026-11-01). |
 | Edge value | **Group z-score** of each edge (`edge_value: standardized`, changed 2026-10-31). A `StandardScaler` per edge is fit on the **pre-sparsified** train edges, then applied to all splits. Selection always ranks by raw \|FC\|. Setting `edge_value: raw` still works but is no longer a baseline we run. |
 | Self-loops | Kept, with `self_loop_weight` (default 1.0) |
 | GCN normalization | Signed symmetric normalization precomputed per graph: `deg_i = s + Σ_j \|w_ij\|`, `ŵ_ij = w_ij / sqrt(deg_i·deg_j)` (self-loop gets `s/deg_i`). Passed as `edge_weight` to `GCNConv(normalize=False, add_self_loops=False)`. Degrees stay positive and signs are kept. |
 | Node features | Learned node-ID embedding `nn.Embedding(num_nodes, embedding_dim)` |
 | Demographics | `include_demo: true` by default (age, head motion → StandardScaler; sex, assessment centre → OneHot), fit on train |
 | Target scaling | StandardScaler on train. Metrics reported on the original scale. |
-| Sweep | keep ∈ {0.1, 0.2, …, 1.0} (10 levels), 1 seed (42) → 10 × 2 masks × 4 tests × 2 FC = **160 runs**. All of these are configurable. |
+| Sweep | keep ∈ {0.0, 0.1, …, 1.0} (11 levels), seeds 0–9. Shared is skipped at 0.0 and 1.0, where it gives the same graphs as personal → 10 × (9×2 + 2) × 4 tests × 2 FC = **1,600 runs** (2026-11-10; was 1 seed, 160 runs). All of these are configurable. |
 | Format | Python package + YAML config + CLI runner |
 
 ## File layout (all new, at repo root; nothing added to `others/`)
@@ -140,7 +140,9 @@ The CLI can override any key (e.g. `--set training.lr=0.001`).
 - [x] Fast inference path for the RL stage: `GCNNet.forward_dense(adj, demo)` + `graphs.dense_gcn_adj` (batched torch signed norm, (B,N,N)) + `common/infer.py:predict_dense`. Same weights/maths as `forward` (equivalence tests in `tests/test_graphs.py`). Keep data resident on the GPU and pass (B,E) masks; no `Data`/`Batch`. ELU kept (negligible cost). `tests/bench_inference.py`: 6–9× faster than build+collate+sparse fwd on CPU; GPU numbers TBD
 - [ ] Smoke run on the cluster with real UKB data (Verification step 2)
 - [x] Shared-mask option (2026-10-31), 25 tests pass
-- [ ] Full sweep (160 runs) + `topk/summarize.py`
+- [x] Single-seed sweep (160 runs, seed 42, fixed split). The curves were too noisy to interpret, which led to the multi-seed sweep below
+- [x] Multi-seed code (2026-11-10), 23 tests pass
+- [ ] Move the old seed-42 output folder aside by hand, then run the full 1,600-run sweep + `topk/summarize.py`
 
 ## Usage
 ```bash
@@ -149,7 +151,7 @@ pytest tests                                                      # local sanity
 python topk/run_sweep.py --fc FC21 --tests GF --keep 0.1 1.0 --max-subjects 2000 --max-epochs 3   # smoke
 python topk/run_sweep.py                                       # full sweep from configs/topk.yaml
 python topk/run_sweep.py --set graph.self_loop_weight=0.5 paths.output_dir=outputs/topk_sl05          # variant
-python topk/summarize.py                                       # table + {output_dir}/summary/test_r2_vs_keep.png
+python topk/summarize.py                                       # mean ± SD + paired Δ tables/figures in {output_dir}/summary/
 python topk/summarize.py --set paths.output_dir=outputs/topk_sl05                                    # summarize a variant
 ```
 
@@ -178,3 +180,17 @@ python topk/summarize.py --set paths.output_dir=outputs/topk_sl05               
 - Why \|raw FC\| for personal: it is the edge-weight thresholding baseline the proposal names. Ranking by \|z\| selects a subject's deviations from the group, which is a different idea and was incompatible with the shared mask anyway.
 - Why `frequency` for shared: see the 2026-10-31 note. `mean_abs` picks nearly the same edges; `abs_mean` mixes sign consistency into the comparison.
 - `prepare_splits` no longer returns `rank_vals`; `rank_scores` is always \|raw FC\|. The `shared_score` column was removed from `results.csv`, so move aside any existing `results.csv` written with that column before appending new runs (rows are appended without a header). 20 tests pass.
+
+## Change (2026-11-10): multi-seed sweep with a split per seed
+Why: the single-seed curves were jagged. Jumps between neighbouring keep levels (e.g. PAL FC21 shared 0.080 → 0.090 → 0.085) were as large as the effects of interest. The pipeline is deterministic (personal = shared at 100%), so this was training and sampling variance.
+- **Seeds 0–9** for every config. The old seed-42 runs are not reused; the user moves the old output folder aside by hand before running (`paths.output_dir` is unchanged).
+- **Split per seed** (`split.per_seed: true`). Error bars then cover both training randomness and which subjects are sampled. Within a seed all configs share the split, so comparisons stay paired. Preprocessors and the shared mask are refit per seed on that seed's train split. `split.seed` is still used for `--max-subjects` subsampling and as the split seed when `per_seed: false`.
+- **Keep 0.0** added: `num_kept_edges` returns 0, so graphs have self-loops only (normalized weight 1). The graph branch gives the same vector for every subject, which makes the model effectively demographics-only. Fixed two k = 0 edge cases in `topk/sparsify.py`: `[:, -0:]` and `order[-0:]` would have selected every edge.
+- **Shared skipped at 0.0 and 1.0** (`topk.sparsify.is_redundant`). `summarize.py` copies the personal rows into those points.
+- `run_sweep.py` loop: test → CSV → split seed → FC → preprocess → (keep, mask, seed). Outputs: `splits/seed{s}/{TEST}_{split}_eids.txt`, `{FC}/{TEST}/preprocessors_seed{s}.pkl`. `results.csv` and `metrics.json` gained a `split_seed` column; run directories are unchanged.
+- `summarize.py`:
+  - `{metric}_vs_keep.png` shows the mean with **±1 SD error bars** across seeds, with personal and shared slightly x-offset.
+  - New **paired Δ vs 100% kept**: per seed, the metric minus the personal keep-1.0 run on the same split, aggregated as mean ± SD (`{metric}_delta_vs_full.csv/.png`).
+  - Prints a warning if any config has fewer seeds than the rest.
+- Tests: keep-0 graphs, `is_redundant`, per-seed splits and skipping in the pipeline test (now `--seeds 0 1`), summarize run end-to-end, and a new `tests/test_summarize.py`.
+

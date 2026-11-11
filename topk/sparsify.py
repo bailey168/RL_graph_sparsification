@@ -2,7 +2,15 @@ import numpy as np
 
 
 def num_kept_edges(num_edges, keep_frac):
+    """k = max(1, floor(p*E)), except keep_frac == 0 keeps no edges (self-loops only)."""
+    if keep_frac <= 0:
+        return 0
     return max(1, int(np.floor(keep_frac * num_edges)))
+
+
+def is_redundant(mask, keep_frac):
+    """At 0% and 100% the shared mask gives the same graphs as the personal mask, so it is not run."""
+    return mask == 'shared' and (keep_frac <= 0 or keep_frac >= 1)
 
 
 def topk_edge_indices(scores, keep_frac):
@@ -14,6 +22,8 @@ def topk_edge_indices(scores, keep_frac):
     """
     num_subjects, num_edges = scores.shape
     k = num_kept_edges(num_edges, keep_frac)
+    if k == 0:
+        return np.empty((num_subjects, 0), dtype=np.int64)
     if k >= num_edges:
         return np.tile(np.arange(num_edges), (num_subjects, 1))
     return np.argpartition(scores, -k, axis=1)[:, -k:]
@@ -21,7 +31,7 @@ def topk_edge_indices(scores, keep_frac):
 
 def edge_retention(top_idx, num_edges):
     """Fraction of subjects that kept each edge, shape (E,)."""
-    counts = np.bincount(top_idx.ravel(), minlength=num_edges)
+    counts = np.bincount(top_idx.ravel().astype(np.int64), minlength=num_edges)
     return counts / top_idx.shape[0]
 
 
@@ -34,6 +44,8 @@ def shared_edge_indices(train_scores, keep_frac):
     """
     num_edges = train_scores.shape[1]
     k = num_kept_edges(num_edges, keep_frac)
+    if k == 0:
+        return np.empty(0, dtype=np.int64)
     freq = edge_retention(topk_edge_indices(train_scores, keep_frac), num_edges)
     order = np.lexsort((train_scores.mean(axis=0), freq))     # last key is primary
     return np.sort(order[-k:])

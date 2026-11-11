@@ -1,7 +1,12 @@
 """Train/evaluate a fixed GCN on top-K sparsified FC graphs across FC types, tests, keep levels and seeds.
 
 Each keep level is run with a personal mask (every subject keeps their own top-K) and/or a shared
-mask (one top-K edge set derived from the training group, applied to everyone).
+mask (one top-K edge set derived from the training group, applied to everyone). The shared mask is
+skipped at keep 0.0 and 1.0, where it gives the same graphs as the personal mask.
+
+With split.per_seed (default) every training seed gets its own train/val/test split, shared by all
+keep levels, masks and FC types for that seed. Splits go to splits/seed{s}/ and preprocessors to
+{FC}/{TEST}/preprocessors_seed{s}.pkl.
 
 Example:
     python topk/run_sweep.py --fc FC21 --tests GF --keep 0.1 1.0 --max-subjects 2000 --max-epochs 3
@@ -30,7 +35,8 @@ from common.config import load_config, snapshot
 from common.data import SPLITS, extract_arrays, load_subject_table, make_split, prepare_splits, save_split
 from common.graphs import build_graphs
 from common.models import build_model
-from topk.sparsify import edge_retention, num_kept_edges, shared_edge_indices, tile_mask, topk_edge_indices
+from topk.sparsify import (edge_retention, is_redundant, num_kept_edges, shared_edge_indices, tile_mask,
+                           topk_edge_indices)
 from common.train import fit
 from common.utils import set_deterministic_training
 
@@ -71,7 +77,8 @@ def make_loaders(graphs, batch_size, num_workers, generator):
     }
 
 
-def run_one(cfg, fc_type, test, mask, keep_frac, seed, prepared, preprocessors, arrays, run_dir, device):
+def run_one(cfg, fc_type, test, mask, keep_frac, seed, prepared, preprocessors, arrays, run_dir, device,
+            split_seed=None):
     graph_cfg, train_cfg = cfg['graph'], cfg['training']
     num_nodes = cfg['fc_types'][fc_type]['num_nodes']
     num_edges = len(arrays['edge_list'])
@@ -103,6 +110,7 @@ def run_one(cfg, fc_type, test, mask, keep_frac, seed, prepared, preprocessors, 
     row = {
         'fc': fc_type, 'test': test, 'mask': mask, 'keep_frac': keep_frac,
         'k_edges': num_kept_edges(num_edges, keep_frac), 'num_edges': num_edges, 'seed': seed,
+        'split_seed': split_seed,
         'n_train': len(graphs['train']), 'n_val': len(graphs['val']), 'n_test': len(graphs['test']),
         'best_epoch': result['best_epoch'], 'epochs_run': result['epochs_run'],
         **result['metrics'], 'minutes': result['minutes'],
@@ -136,51 +144,60 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
+    per_seed = cfg['split'].get('per_seed', False)
+
+    def split_seed_for(seed):
+        return seed if per_seed else cfg['split']['seed']
+
     for test in tests:
         pending = [(fc, k, m, s) for fc in fc_types for k in keep_fracs for m in masks for s in seeds
-                   if args.overwrite or not os.path.exists(
-                       os.path.join(run_dir_for(output_dir, fc, test, m, k, s), 'metrics.json'))]
+                   if not is_redundant(m, k)
+                   and (args.overwrite or not os.path.exists(
+                       os.path.join(run_dir_for(output_dir, fc, test, m, k, s), 'metrics.json')))]
         if not pending:
             print(f"[{test}] All runs complete, skipping")
             continue
 
         df = load_subject_table(test, cfg, args.max_subjects)
-        split_idx = make_split(df.index.to_numpy(), cfg)
-        save_split(df.index.to_numpy(), split_idx, os.path.join(output_dir, 'splits'), test)
-        print(f"[{test}] Split - Train: {len(split_idx['train'])}, Val: {len(split_idx['val'])}, "
-              f"Test: {len(split_idx['test'])}")
+        eids = df.index.to_numpy()
+        for split_seed in sorted({split_seed_for(s) for _, _, _, s in pending}):
+            split_pending = [p for p in pending if split_seed_for(p[3]) == split_seed]
+            split_idx = make_split(eids, cfg, seed=split_seed)
+            save_split(eids, split_idx, os.path.join(output_dir, 'splits', f'seed{split_seed}'), test)
+            print(f"\n[{test}] Split seed {split_seed} - Train: {len(split_idx['train'])}, "
+                  f"Val: {len(split_idx['val'])}, Test: {len(split_idx['test'])}")
 
-        for fc_type in fc_types:
-            fc_pending = [(k, m, s) for fc, k, m, s in pending if fc == fc_type]
-            if not fc_pending:
-                continue
+            for fc_type in fc_types:
+                fc_pending = [(k, m, s) for fc, k, m, s in split_pending if fc == fc_type]
+                if not fc_pending:
+                    continue
 
-            arrays = extract_arrays(df, test, fc_type, cfg)
-            prepared, preprocessors = prepare_splits(arrays, split_idx, cfg)
-            pre_dir = os.path.join(output_dir, fc_type, test)
-            os.makedirs(pre_dir, exist_ok=True)
-            joblib.dump(preprocessors, os.path.join(pre_dir, 'preprocessors.pkl'))
+                arrays = extract_arrays(df, test, fc_type, cfg)
+                prepared, preprocessors = prepare_splits(arrays, split_idx, cfg)
+                pre_dir = os.path.join(output_dir, fc_type, test)
+                os.makedirs(pre_dir, exist_ok=True)
+                joblib.dump(preprocessors, os.path.join(pre_dir, f'preprocessors_seed{split_seed}.pkl'))
 
-            for keep_frac, mask, seed in fc_pending:
-                run_dir = run_dir_for(output_dir, fc_type, test, mask, keep_frac, seed)
-                print(f"\n=== {fc_type} | {test} | {mask} | keep={keep_frac:.2f} | seed={seed} ===")
-                try:
-                    row = run_one(cfg, fc_type, test, mask, keep_frac, seed, prepared, preprocessors,
-                                  arrays, run_dir, device)
-                    append_row(results_path, row)
-                    print(f"  best_epoch={row['best_epoch']} test R²={row['test_r2']:.4f} "
-                          f"R²corr={row['test_r2_corr']:.4f} ({row['minutes']:.1f}m)")
-                except Exception as e:
-                    traceback.print_exc()
-                    append_row(failures_path, {'fc': fc_type, 'test': test, 'mask': mask, 'keep_frac': keep_frac,
-                                               'seed': seed, 'error': repr(e)})
-                finally:
-                    gc.collect()
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+                for keep_frac, mask, seed in fc_pending:
+                    run_dir = run_dir_for(output_dir, fc_type, test, mask, keep_frac, seed)
+                    print(f"\n=== {fc_type} | {test} | {mask} | keep={keep_frac:.2f} | seed={seed} ===")
+                    try:
+                        row = run_one(cfg, fc_type, test, mask, keep_frac, seed, prepared, preprocessors,
+                                      arrays, run_dir, device, split_seed=split_seed)
+                        append_row(results_path, row)
+                        print(f"  best_epoch={row['best_epoch']} test R²={row['test_r2']:.4f} "
+                              f"R²corr={row['test_r2_corr']:.4f} ({row['minutes']:.1f}m)")
+                    except Exception as e:
+                        traceback.print_exc()
+                        append_row(failures_path, {'fc': fc_type, 'test': test, 'mask': mask,
+                                                   'keep_frac': keep_frac, 'seed': seed, 'error': repr(e)})
+                    finally:
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
 
-            del arrays, prepared, preprocessors
-            gc.collect()
+                del arrays, prepared, preprocessors
+                gc.collect()
         del df
 
 

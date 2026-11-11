@@ -100,15 +100,19 @@ def extract_arrays(df, test, fc_type, cfg):
     }
 
 
-def make_split(eids, cfg):
-    """70/15/15 split (as in the notebook). Depends only on the subject list, so FC21/FC55 share it."""
+def make_split(eids, cfg, seed=None):
+    """70/15/15 split (as in the notebook). Depends only on the subject list and seed, so FC21/FC55 share it.
+
+    seed: split seed (the run seed when split.per_seed is true); defaults to split.seed.
+    """
     split_cfg = cfg['split']
+    seed = split_cfg['seed'] if seed is None else seed
     holdout = split_cfg['val_frac'] + split_cfg['test_frac']
     train_idx, temp_idx = train_test_split(
-        np.arange(len(eids)), test_size=holdout, random_state=split_cfg['seed']
+        np.arange(len(eids)), test_size=holdout, random_state=seed
     )
     val_idx, test_idx = train_test_split(
-        temp_idx, test_size=split_cfg['test_frac'] / holdout, random_state=split_cfg['seed']
+        temp_idx, test_size=split_cfg['test_frac'] / holdout, random_state=seed
     )
     return {'train': train_idx, 'val': val_idx, 'test': test_idx}
 

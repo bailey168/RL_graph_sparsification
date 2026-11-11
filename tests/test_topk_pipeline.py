@@ -33,7 +33,7 @@ def make_fake_csv(data_dir, test='GF', target_col='p20016_i2', n=300):
 def run_sweep(tmp_path, *extra):
     cmd = [sys.executable, os.path.join(ROOT, 'topk', 'run_sweep.py'),
            '--config', os.path.join(ROOT, 'configs', 'topk.yaml'),
-           '--tests', 'GF', '--keep', '0.1', '1.0', '--max-epochs', '3',
+           '--tests', 'GF', '--keep', '0.0', '0.1', '1.0', '--seeds', '0', '1', '--max-epochs', '3',
            '--set', f'paths.data_dir={tmp_path / "data"}', f'paths.output_dir={tmp_path / "out"}',
            f'paths.region_dir={os.path.join(ROOT, "region_names")}', 'split.use_eid_file=false',
            'training.batch_size=64', *extra]
@@ -47,20 +47,28 @@ def test_sweep_end_to_end(tmp_path):
 
     out = tmp_path / 'out'
     results = pd.read_csv(out / 'results.csv')
-    assert len(results) == 8  # 2 FC types x 2 keep levels x 2 masks
+    # Per FC and seed: keep 0.0 personal, keep 0.1 personal + shared, keep 1.0 personal (shared skipped at 0 and 1)
+    assert len(results) == 2 * 2 * 4
     assert set(results['fc']) == {'FC21', 'FC55'}
     assert set(results['mask']) == {'personal', 'shared'}
+    assert set(results['seed']) == {0, 1}
+    assert (results['split_seed'] == results['seed']).all()
+    assert set(results.loc[results['mask'] == 'shared', 'keep_frac']) == {0.1}
     assert not (out / 'failures.csv').exists()
     assert (results[['n_train', 'n_val', 'n_test']].sum(axis=1) == 300).all()
+    assert (results.loc[results['keep_frac'] == 0.0, 'k_edges'] == 0).all()
 
-    run_dir = out / 'FC55' / 'GF' / 'personal' / 'keep010' / 'seed42'
+    run_dir = out / 'FC55' / 'GF' / 'personal' / 'keep010' / 'seed0'
     for f in ('metrics.json', 'config.yaml', 'losses.csv', 'test_predictions.csv', 'model.pt', 'edge_retention.npy'):
         assert (run_dir / f).exists(), f
     retention = np.load(run_dir / 'edge_retention.npy')
     assert retention.shape == (1485,)
     assert np.isclose(retention.sum(), 148)  # k = floor(0.1 * 1485) edges kept per subject
+    assert np.load(out / 'FC55' / 'GF' / 'personal' / 'keep000' / 'seed0' / 'edge_retention.npy').sum() == 0
+    assert not (out / 'FC55' / 'GF' / 'shared' / 'keep000').exists()
+    assert not (out / 'FC55' / 'GF' / 'shared' / 'keep100').exists()
 
-    shared_dir = out / 'FC55' / 'GF' / 'shared' / 'keep010' / 'seed42'
+    shared_dir = out / 'FC55' / 'GF' / 'shared' / 'keep010' / 'seed0'
     shared = np.load(shared_dir / 'shared_edges.npy')
     assert shared.shape == (148,)
     retention = np.load(shared_dir / 'edge_retention.npy')
@@ -68,16 +76,25 @@ def test_sweep_end_to_end(tmp_path):
     assert np.array_equal(np.flatnonzero(retention), np.sort(shared))
     assert not (run_dir / 'shared_edges.npy').exists()
 
-    # keep=1.0: both masks give the full graph, so results match
-    full = results[results['keep_frac'] == 1.0].set_index(['fc', 'mask'])['test_r2']
-    for fc in ('FC21', 'FC55'):
-        assert np.isclose(full[(fc, 'personal')], full[(fc, 'shared')], atol=1e-5)
-
-    for split in ('train', 'val', 'test'):
-        assert (out / 'splits' / f'GF_{split}_eids.txt').exists()
+    # Each seed gets its own split, saved under splits/seed{s}/, and preprocessors per seed
+    for seed in (0, 1):
+        for split in ('train', 'val', 'test'):
+            assert (out / 'splits' / f'seed{seed}' / f'GF_{split}_eids.txt').exists()
+        assert (out / 'FC21' / 'GF' / f'preprocessors_seed{seed}.pkl').exists()
+    test0 = np.loadtxt(out / 'splits' / 'seed0' / 'GF_test_eids.txt')
+    test1 = np.loadtxt(out / 'splits' / 'seed1' / 'GF_test_eids.txt')
+    assert len(test0) == len(test1) and not np.array_equal(np.sort(test0), np.sort(test1))
 
     # Rerun skips completed runs
     proc = run_sweep(tmp_path)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert 'All runs complete' in proc.stdout
-    assert len(pd.read_csv(out / 'results.csv')) == 8
+    assert len(pd.read_csv(out / 'results.csv')) == 16
+
+    # summarize.py runs on the real output and writes both figures
+    proc = subprocess.run([sys.executable, os.path.join(ROOT, 'topk', 'summarize.py'),
+                           '--results', str(out / 'results.csv'), '--out-dir', str(out / 'summary')],
+                          capture_output=True, text=True, cwd=ROOT)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    for f in ('test_r2_by_keep.csv', 'test_r2_vs_keep.png', 'test_r2_delta_vs_full.csv', 'test_r2_delta_vs_full.png'):
+        assert (out / 'summary' / f).exists(), f
