@@ -35,10 +35,11 @@ from common.config import load_config, snapshot
 from common.data import SPLITS, extract_arrays, load_subject_table, make_split, prepare_splits, save_split
 from common.graphs import build_graphs
 from common.models import build_model
-from topk.sparsify import (edge_retention, is_redundant, num_kept_edges, shared_edge_indices, tile_mask,
-                           topk_edge_indices)
 from common.train import fit
 from common.utils import set_deterministic_training
+from topk.sparsify import (edge_retention, is_redundant, num_kept_edges, shared_edge_indices, tile_mask,
+                           topk_edge_indices)
+from topk.summarize import auto_summarize
 
 
 def parse_args():
@@ -54,11 +55,17 @@ def parse_args():
     parser.add_argument('--max-epochs', type=int, help='Override training.max_epochs')
     parser.add_argument('--overwrite', action='store_true', help='Rerun runs that already have metrics.json')
     parser.add_argument('--set', nargs='*', default=[], metavar='KEY=VALUE', help='Config overrides')
+    parser.add_argument('--no-summary', action='store_true',
+                        help="Don't run topk/summarize.py on {output_dir}/results.csv after training")
     return parser.parse_args()
 
 
+def keep_dir(output_dir, fc_type, test, mask, keep_frac):
+    return os.path.join(output_dir, fc_type, test, mask, f'keep{int(round(keep_frac * 100)):03d}')
+
+
 def run_dir_for(output_dir, fc_type, test, mask, keep_frac, seed):
-    return os.path.join(output_dir, fc_type, test, mask, f'keep{int(round(keep_frac * 100)):03d}', f'seed{seed}')
+    return os.path.join(keep_dir(output_dir, fc_type, test, mask, keep_frac), f'seed{seed}')
 
 
 def select_edges(prepared, keep_frac, mask):
@@ -69,6 +76,12 @@ def select_edges(prepared, keep_frac, mask):
     return {name: tile_mask(shared, len(prepared[name]['eids'])) for name in SPLITS}, shared
 
 
+def build_split_graphs(prepared, top_idx, edge_list, num_nodes, self_loop_weight):
+    return {name: build_graphs(prepared[name]['edge_vals'], top_idx[name], prepared[name]['demo'],
+                               prepared[name]['y'], prepared[name]['eids'], edge_list, num_nodes, self_loop_weight)
+            for name in SPLITS}
+
+
 def make_loaders(graphs, batch_size, num_workers, generator):
     return {
         name: DataLoader(graphs[name], batch_size=batch_size, shuffle=(name == 'train'),
@@ -77,18 +90,62 @@ def make_loaders(graphs, batch_size, num_workers, generator):
     }
 
 
+def prepare_fc(df, test, fc_type, split_idx, split_seed, cfg, output_dir):
+    """Arrays + train-fitted preprocessing for one FC type; saves the preprocessors next to the runs."""
+    arrays = extract_arrays(df, test, fc_type, cfg)
+    prepared, preprocessors = prepare_splits(arrays, split_idx, cfg)
+    pre_dir = os.path.join(output_dir, fc_type, test)
+    os.makedirs(pre_dir, exist_ok=True)
+    joblib.dump(preprocessors, os.path.join(pre_dir, f'preprocessors_seed{split_seed}.pkl'))
+    return arrays, prepared, preprocessors
+
+
+def save_history(out_dir, result):
+    pd.DataFrame(result['history']).to_csv(os.path.join(out_dir, 'losses.csv'), index_label='epoch')
+    pd.DataFrame(result['test_predictions']).to_csv(os.path.join(out_dir, 'test_predictions.csv'), index=False)
+
+
+def save_mask(out_dir, top_idx, shared, num_edges):
+    np.save(os.path.join(out_dir, 'edge_retention.npy'), edge_retention(top_idx['train'], num_edges))
+    if shared is not None:
+        np.save(os.path.join(out_dir, 'shared_edges.npy'), shared)
+
+
+def result_row(fc_type, test, mask, keep_frac, num_edges, seed, split_seed, graphs, best_epoch, epochs_run,
+               metrics, minutes):
+    """The results.csv columns shared by run_sweep.py and run_optuna.py, in order."""
+    return {
+        'fc': fc_type, 'test': test, 'mask': mask, 'keep_frac': keep_frac,
+        'k_edges': num_kept_edges(num_edges, keep_frac), 'num_edges': num_edges, 'seed': seed,
+        'split_seed': split_seed,
+        'n_train': len(graphs['train']), 'n_val': len(graphs['val']), 'n_test': len(graphs['test']),
+        'best_epoch': best_epoch, 'epochs_run': epochs_run, **metrics, 'minutes': minutes,
+    }
+
+
+def write_json(path, obj):
+    with open(path, 'w') as f:
+        json.dump(obj, f, indent=2)
+
+
+def append_row(path, row):
+    pd.DataFrame([row]).to_csv(path, mode='a', header=not os.path.exists(path), index=False)
+
+
+def free_memory():
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def run_one(cfg, fc_type, test, mask, keep_frac, seed, prepared, preprocessors, arrays, run_dir, device,
             split_seed=None):
-    graph_cfg, train_cfg = cfg['graph'], cfg['training']
+    train_cfg = cfg['training']
     num_nodes = cfg['fc_types'][fc_type]['num_nodes']
     num_edges = len(arrays['edge_list'])
 
     top_idx, shared = select_edges(prepared, keep_frac, mask)
-    graphs = {}
-    for name in SPLITS:
-        p = prepared[name]
-        graphs[name] = build_graphs(p['edge_vals'], top_idx[name], p['demo'], p['y'], p['eids'],
-                                    arrays['edge_list'], num_nodes, graph_cfg['self_loop_weight'])
+    graphs = build_split_graphs(prepared, top_idx, arrays['edge_list'], num_nodes, cfg['graph']['self_loop_weight'])
 
     generator = set_deterministic_training(seed)
     loaders = make_loaders(graphs, train_cfg['batch_size'], train_cfg['num_workers'], generator)
@@ -98,31 +155,16 @@ def run_one(cfg, fc_type, test, mask, keep_frac, seed, prepared, preprocessors, 
 
     os.makedirs(run_dir, exist_ok=True)
     torch.save(model.state_dict(), os.path.join(run_dir, 'model.pt'))
-    pd.DataFrame(result['history']).to_csv(os.path.join(run_dir, 'losses.csv'), index_label='epoch')
-    pd.DataFrame(result['test_predictions']).to_csv(os.path.join(run_dir, 'test_predictions.csv'), index=False)
-    np.save(os.path.join(run_dir, 'edge_retention.npy'), edge_retention(top_idx['train'], num_edges))
-    if shared is not None:
-        np.save(os.path.join(run_dir, 'shared_edges.npy'), shared)
+    save_history(run_dir, result)
+    save_mask(run_dir, top_idx, shared, num_edges)
     with open(os.path.join(run_dir, 'config.yaml'), 'w') as f:
         yaml.safe_dump(snapshot(cfg, fc=fc_type, test=test, mask=mask, keep_frac=keep_frac, seed=seed), f,
                        sort_keys=False)
 
-    row = {
-        'fc': fc_type, 'test': test, 'mask': mask, 'keep_frac': keep_frac,
-        'k_edges': num_kept_edges(num_edges, keep_frac), 'num_edges': num_edges, 'seed': seed,
-        'split_seed': split_seed,
-        'n_train': len(graphs['train']), 'n_val': len(graphs['val']), 'n_test': len(graphs['test']),
-        'best_epoch': result['best_epoch'], 'epochs_run': result['epochs_run'],
-        **result['metrics'], 'minutes': result['minutes'],
-    }
-    # metrics.json is written last: its presence marks the run as complete
-    with open(os.path.join(run_dir, 'metrics.json'), 'w') as f:
-        json.dump(row, f, indent=2)
+    row = result_row(fc_type, test, mask, keep_frac, num_edges, seed, split_seed, graphs, result['best_epoch'],
+                     result['epochs_run'], result['metrics'], result['minutes'])
+    write_json(os.path.join(run_dir, 'metrics.json'), row)   # written last: marks the run as complete
     return row
-
-
-def append_row(path, row):
-    pd.DataFrame([row]).to_csv(path, mode='a', header=not os.path.exists(path), index=False)
 
 
 def main():
@@ -172,11 +214,8 @@ def main():
                 if not fc_pending:
                     continue
 
-                arrays = extract_arrays(df, test, fc_type, cfg)
-                prepared, preprocessors = prepare_splits(arrays, split_idx, cfg)
-                pre_dir = os.path.join(output_dir, fc_type, test)
-                os.makedirs(pre_dir, exist_ok=True)
-                joblib.dump(preprocessors, os.path.join(pre_dir, f'preprocessors_seed{split_seed}.pkl'))
+                arrays, prepared, preprocessors = prepare_fc(df, test, fc_type, split_idx, split_seed, cfg,
+                                                             output_dir)
 
                 for keep_frac, mask, seed in fc_pending:
                     run_dir = run_dir_for(output_dir, fc_type, test, mask, keep_frac, seed)
@@ -192,13 +231,14 @@ def main():
                         append_row(failures_path, {'fc': fc_type, 'test': test, 'mask': mask,
                                                    'keep_frac': keep_frac, 'seed': seed, 'error': repr(e)})
                     finally:
-                        gc.collect()
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
+                        free_memory()
 
                 del arrays, prepared, preprocessors
                 gc.collect()
         del df
+
+    if not args.no_summary:
+        auto_summarize(output_dir)
 
 
 if __name__ == '__main__':

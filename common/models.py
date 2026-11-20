@@ -14,10 +14,11 @@ class GCNNet(torch.nn.Module):
 
     def __init__(self, num_nodes, embedding_dim, hidden_channels, gnn_num_layers,
                  classifier_hidden_dims, node_dropout, classifier_dropout, pooling='attention',
-                 include_demo=True, demo_dim=0, demo_embed_dim=8, out_dim=1):
+                 include_demo=True, demo_dim=0, demo_embed_dim=8, out_dim=1, edge_dropout=0.0):
         super().__init__()
         self.gnn_num_layers = gnn_num_layers
         self.node_dropout = node_dropout
+        self.edge_dropout = edge_dropout
         self.include_demo = include_demo
         self.out_dim = out_dim
         self.pooling = pooling
@@ -82,26 +83,38 @@ class GCNNet(torch.nn.Module):
                     if module.bias is not None:
                         torch.nn.init.zeros_(module.bias)
 
-    def forward(self, data):
-        x = self.node_embedding(data.x)
+    def drop_edges(self, edge_index, edge_weight):
+        """DropEdge as inverted dropout on the normalized weights: during training, each non-self-loop entry
+        is zeroed with probability edge_dropout and survivors are scaled by 1/(1-p). Self-loops are always
+        kept. Sampled once per forward pass (all conv layers see the same graph)."""
+        if not self.training or self.edge_dropout <= 0:
+            return edge_weight
+        is_edge = edge_index[0] != edge_index[1]
+        return torch.where(is_edge, F.dropout(edge_weight, p=self.edge_dropout, training=True), edge_weight)
 
-        for i, conv in enumerate(self.conv_layers):
-            x = conv(x, data.edge_index, edge_weight=data.edge_weight)
-            if i < self.gnn_num_layers - 1:
-                x = self.batch_norms[i](x)
-                x = F.elu(x)
-                x = F.dropout(x, p=self.node_dropout, training=self.training)
+    def _post_conv(self, i, x):
+        """BatchNorm -> ELU -> dropout after every conv layer except the last. x: (nodes, H)."""
+        if i == self.gnn_num_layers - 1:
+            return x
+        x = F.elu(self.batch_norms[i](x))
+        return F.dropout(x, p=self.node_dropout, training=self.training)
 
-        if self.pool is not None:
-            graph_features = self.pool(x, data.batch)
-        else:
-            graph_features = global_mean_pool(x, data.batch)
-
+    def _readout(self, graph_features, demographics):
+        """(+ projected demographics) -> MLP head."""
         if self.include_demo:
-            graph_features = torch.cat([graph_features, self.demo_projection(data.demographics)], dim=1)
-
+            graph_features = torch.cat([graph_features, self.demo_projection(demographics)], dim=1)
         out = self.classifier(graph_features)
         return out.squeeze(-1) if self.out_dim == 1 else out
+
+    def forward(self, data):
+        x = self.node_embedding(data.x)
+        edge_weight = self.drop_edges(data.edge_index, data.edge_weight)
+
+        for i, conv in enumerate(self.conv_layers):
+            x = self._post_conv(i, conv(x, data.edge_index, edge_weight=edge_weight))
+
+        graph_features = self.pool(x, data.batch) if self.pool is not None else global_mean_pool(x, data.batch)
+        return self._readout(graph_features, data.demographics)
 
     def forward_dense(self, adj, demographics=None):
         """Same computation as forward(), on a dense normalized adjacency (B, N, N).
@@ -111,25 +124,20 @@ class GCNNet(torch.nn.Module):
         """
         B, N, _ = adj.shape
         x = self.node_embedding.weight
+        if self.training and self.edge_dropout > 0:   # same DropEdge as forward(); diagonal = self-loops kept
+            off_diag = ~torch.eye(N, dtype=torch.bool, device=adj.device)
+            adj = torch.where(off_diag, F.dropout(adj, p=self.edge_dropout, training=True), adj)
 
         for i, conv in enumerate(self.conv_layers):
             x = adj @ conv.lin(x) + conv.bias          # (B, N, H); layer 0 broadcasts (N, H)
-            if i < self.gnn_num_layers - 1:
-                x = self.batch_norms[i](x.reshape(B * N, -1)).reshape(B, N, -1)
-                x = F.elu(x)
-                x = F.dropout(x, p=self.node_dropout, training=self.training)
+            x = self._post_conv(i, x.reshape(B * N, -1)).reshape(B, N, -1)   # BatchNorm wants (nodes, H)
 
         if self.pool is not None:
             gate = torch.softmax(self.pool.gate_nn(x), dim=1)   # (B, N, 1)
             graph_features = (gate * x).sum(dim=1)
         else:
             graph_features = x.mean(dim=1)
-
-        if self.include_demo:
-            graph_features = torch.cat([graph_features, self.demo_projection(demographics)], dim=1)
-
-        out = self.classifier(graph_features)
-        return out.squeeze(-1) if self.out_dim == 1 else out
+        return self._readout(graph_features, demographics)
 
 
 def build_model(model_cfg, num_nodes, demo_dim):
@@ -145,4 +153,5 @@ def build_model(model_cfg, num_nodes, demo_dim):
         include_demo=model_cfg['include_demo'],
         demo_dim=demo_dim,
         demo_embed_dim=model_cfg['demo_embed_dim'],
+        edge_dropout=model_cfg.get('edge_dropout', 0.0),
     )

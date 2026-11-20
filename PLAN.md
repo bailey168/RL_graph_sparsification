@@ -143,6 +143,9 @@ The CLI can override any key (e.g. `--set training.lr=0.001`).
 - [x] Single-seed sweep (160 runs, seed 42, fixed split). The curves were too noisy to interpret, which led to the multi-seed sweep below
 - [x] Multi-seed code (2026-11-10), 23 tests pass
 - [ ] Move the old seed-42 output folder aside by hand, then run the full 1,600-run sweep + `topk/summarize.py`
+- [x] Optuna-tuned sweep code (2026-11-19, see below), 28 tests pass
+- [x] Optuna scope narrowed to FC55 × {GF, DSST}, pooling fixed, edge dropout added, auto-summary (2026-11-19), 29 tests pass
+- [ ] Optuna cluster smoke test, then the full 40-study run (summary is written automatically)
 
 ## Usage
 ```bash
@@ -153,6 +156,10 @@ python topk/run_sweep.py                                       # full sweep from
 python topk/run_sweep.py --set graph.self_loop_weight=0.5 paths.output_dir=outputs/topk_sl05          # variant
 python topk/summarize.py                                       # mean ± SD + paired Δ tables/figures in {output_dir}/summary/
 python topk/summarize.py --set paths.output_dir=outputs/topk_sl05                                    # summarize a variant
+# Optuna-tuned sweep (one study per FC × test × mask × keep); defaults FC55 × {GF, DSST} from sweep.fc/sweep.tests
+python topk/run_optuna.py --tests GF --keep 0.1 1.0 --max-subjects 2000 --n-trials 5 --max-epochs 5   # smoke
+python topk/run_optuna.py --tests GF                           # one cluster job per test; resumable; summarizes at the end
+python topk/summarize.py --config configs/topk_optuna.yaml     # re-summarize by hand (e.g. after parallel jobs)
 ```
 
 ## Change (2026-11-09): summarize.py reads paths from config
@@ -194,3 +201,49 @@ Why: the single-seed curves were jagged. Jumps between neighbouring keep levels 
   - Prints a warning if any config has fewer seeds than the rest.
 - Tests: keep-0 graphs, `is_redundant`, per-seed splits and skipping in the pipeline test (now `--seeds 0 1`), summarize run end-to-end, and a new `tests/test_summarize.py`.
 
+
+## Change (2026-11-19): Optuna-tuned sweep (one tuned model per sparsity level)
+Why: one fixed hyperparameter config can suit some keep levels better than others, which mixes that fit into the R²-vs-sparsity curve. Each sparsity level now gets its own hyperparameter search and one final model, and the 10-seed repeats are dropped for this run. The 10-seed sweep code and outputs are left as they were.
+
+| Topic | Decision |
+|---|---|
+| Studies | One per (FC, test, mask, keep): 4 × 2 × (11 personal + 9 shared) = **160 studies**. Shared is still skipped at 0.0 and 1.0. |
+| Trials | **100 per study**: TPE (`multivariate`, `group`, 10 random startup trials). Pruner is **off by default** (`optuna.pruner.enabled: false`, updated 2026-11-19): every trial trains to early stopping. Turn on with `--set optuna.pruner.enabled=true`, which uses Hyperband (`min_resource` 50, `reduction_factor` 2, `max_resource` = `max_epochs`). |
+| Objective | Best val MSE (scaled target) from early stopping. Test metrics are stored as trial user attrs only and never used for selection. |
+| Seed | **0** for the split, every trial's training and the sampler. The RL stage uses the same split. Trials differ only in their hyperparameters. Because the sampler seed is the same, every study starts with the same 10 random configs, which also makes studies easier to compare. |
+| Final model | The best trial's weights, saved when the trial finishes. No retraining, unless the checkpoint on disk doesn't match `study.best_trial` after a crash; then that trial is retrained with the same seed. |
+| Search space | (updated 2026-11-19) `hidden_channels` 16–256, `embedding_dim` 8–min(64, hidden) (`at_most: model.hidden_channels`, inclusive), `gnn_num_layers` 1–4, `classifier_hidden_dims` (1–3 strictly decreasing powers of 2, first layer ≤ hidden/2 via strict `below:`, last ≥ 4), `node_dropout` / `classifier_dropout` / `edge_dropout` 0–0.7, `demo_embed_dim` 2–8, `lr` 1e-4–1e-2 (log), `weight_decay` 1e-5–1e-1 (log). **Fixed:** `pooling` (attention), `self_loop_weight` (it interacts with sparsity), `batch_size`, `warmup_epochs`, `max_epochs`, patience, `edge_value`. |
+| Output | `/scratch/bng/cartbind/data/RL_outputs/topk_optuna` |
+
+Files:
+- `common/tuning.py` (new, method-agnostic, for reuse by RL):
+  - config-driven search space (`int`, `float`, `categorical`, `pow2`, `decreasing_pow2`; dynamic upper bounds `at_most:` inclusive / `below:` strict from an earlier key), `suggest_config` and `config_from_params`
+  - `make_study` (one SQLite file per study, resumable), `remaining_trials`, `pruning_callback`, `is_new_best`
+  - `save_study_outputs`: `trials.csv`, `best_params.json`, `param_importances.json` (fANOVA), and plots of optimization history, parallel coordinates, param importances and slices. Each plot is saved as HTML (plotly) and PNG (matplotlib backend, so no kaleido/Chrome is needed on the cluster).
+- `common/config.py`: a `base: other.yaml` key deep-merges a parent config. `configs/topk_optuna.yaml` inherits `topk.yaml` this way.
+- `common/train.py`: `fit(..., epoch_callback=None)` is used for pruning, and the result gains `best_val_loss`. The existing sweep's behaviour is unchanged.
+- `topk/run_optuna.py`: graphs are built once per study.
+  - Per study it writes `{output_dir}/{FC}/{TEST}/{mask}/keep{pp}/`, containing `study.db`, `trials.csv`, `best_params.json`, `param_importances.json`, `config.yaml` (with the best params applied), `model.pt`, `losses.csv`, `test_predictions.csv`, `best_trial.json`, `edge_retention.npy`, `[shared_edges.npy]`, `plots/` and `metrics.json` (written last).
+  - It appends to `results.csv`, which has the same columns as the old sweep (seed 0) plus `best_trial`, `n_trials_complete`, `n_pruned` and `n_failed`, and to `best_params.csv`.
+  - A study without `metrics.json` resumes and tops up to `n_trials`. `--overwrite` restarts a study from scratch.
+- `topk/summarize.py`: handles one seed (no error bars; labelled "single seed"). If the Optuna files exist, it also writes `best_params_vs_keep_{TEST}.png` and `param_importance_by_keep.csv` / `param_importance_by_keep_{FC}_{mask}.png`.
+- `requirements.txt`: + optuna, plotly. Tests: `tests/test_tuning.py`, `tests/test_topk_optuna_pipeline.py`.
+- RL later: write `configs/rl_optuna.yaml` with its own `optuna.search_space` and objective, and reuse `common/tuning.py`.
+
+## Change (2026-11-19, later): narrower Optuna scope, edge dropout, auto-summary
+- **Scope:** only **FC55** and **GF, DSST** → 2 × (11 + 9) = **40 studies**. Set with new optional keys `sweep.fc` / `sweep.tests` in `configs/topk_optuna.yaml`; `--fc` / `--tests` still override. `fc_types` / `tests` maps in `topk.yaml` stay complete (the loaders need them).
+- **Pooling** is fixed to attention and no longer searched.
+- `configs/topk_optuna.yaml` now states `sweep.keep_fracs` and `sweep.masks: [personal, shared]` explicitly instead of inheriting them from `topk.yaml` (same values), so the run's full scope is visible in one file.
+- **Edge dropout (DropEdge)** was added to `GCNNet` (`model.edge_dropout`, default 0.0 in `topk.yaml`, so the fixed sweep is unchanged) and is searched over 0–0.5 (step 0.05).
+  - During training, each non-self-loop entry of the precomputed normalized `edge_weight` is zeroed with probability p, and the survivors are scaled by 1/(1-p) (inverted dropout, no renormalization). Self-loops are always kept, and one mask is shared by all conv layers. `forward_dense` does the same on the off-diagonal of `adj`.
+  - Eval mode is unaffected, so the RL inference path and the sparse/dense equivalence are unchanged.
+  - Why: the dense model gets its own regularizer against noisy edges, which makes the comparison with top-K fairer, and the model may be more robust when scoring RL-sparsified graphs. It does nothing at keep 0.0.
+- **Auto-summary:** `run_optuna.py` and `run_sweep.py` call `topk.summarize.auto_summarize(output_dir)` at the end (`--no-summary` to skip). It writes into `{output_dir}/summary/` and never raises. `summarize.py`'s logic now lives in `summarize(results_path, out_dir, metric)`. With parallel jobs, the last one to finish writes the complete summary, and it can also be rerun by hand.
+
+## Change (2026-11-19): simplification refactor (no behaviour change)
+- `topk/run_sweep.py` now holds shared helpers that `run_optuna.py` reuses: `keep_dir`, `build_split_graphs`, `prepare_fc`, `save_history`, `save_mask`, `result_row`, `write_json` and `free_memory`. Results columns and order are unchanged.
+- `get_dotted` / `set_dotted` moved from `common/tuning.py` into `common/config.py` (also used for `--set` overrides).
+- `GCNNet`: `_post_conv` and `_readout` are shared by `forward` and `forward_dense`. Parameter names and init are unchanged, so old `model.pt` files still load.
+- Smaller cleanups in `common/data.py`, `common/train.py` and `topk/summarize.py` (`save_fig`, `fc_colors`, `LINESTYLES`).
+- Tests: `tests/conftest.py` holds the shared `fc21` fixture, and `pytest.ini` sets `pythonpath = .` (no more `sys.path` hacks in test files).
+- Verified: all 31 tests pass. Synthetic `run_sweep.py` and `run_optuna.py` outputs (results.csv, metrics.json, model.pt tensors, splits, masks, Optuna trials) are identical to the pre-refactor code, apart from timing fields.

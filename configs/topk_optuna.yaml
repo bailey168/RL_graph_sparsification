@@ -1,0 +1,43 @@
+# Top-K sweep with per-sparsity-level Optuna hyperparameter search (topk/run_optuna.py).
+# Inherits everything from topk.yaml; only the keys below change. sweep.seeds is not used here:
+# every study uses optuna.seed for the split, the training seed and the TPE sampler.
+base: topk.yaml
+
+paths:
+  output_dir: /scratch/bng/cartbind/data/RL_outputs/topk_optuna
+
+sweep:
+  fc: [FC55]              # FC types / tests to run by default (--fc / --tests override)
+  tests: [GF, DSST]
+  keep_fracs: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]   # --keep overrides
+  # personal: each subject keeps its own top-K by |raw FC|
+  # shared: one edge set for everyone (edges most often in train subjects' personal top-K)
+  # shared is skipped at keep 0.0 and 1.0 (same graphs as personal) -> 11 + 9 = 20 studies per FC x test
+  masks: [personal, shared]   # --masks overrides
+
+optuna:
+  n_trials: 50            # finished (complete + pruned) trials per study; reruns top up to this number
+  seed: 0                 # split seed = training seed = sampler seed (seed-0 split is the one the RL stage uses)
+  direction: minimize     # objective: best val MSE (scaled target) from early stopping
+  sampler:                # TPE
+    multivariate: true
+    group: true           # handles the conditional classifier-layer params
+    n_startup_trials: 10  # random trials before TPE kicks in
+  pruner:
+    enabled: false        # true: stop unpromising trials early (--set optuna.pruner.enabled=true)
+    type: hyperband       # hyperband | median; max_resource = training.max_epochs
+    min_resource: 50
+    reduction_factor: 2
+  # Dotted config keys -> spec. Fixed (not searched): model.pooling (attention), graph.self_loop_weight, training.batch_size,
+  # training.warmup_epochs, training.max_epochs, early stopping, graph.edge_value.
+  search_space:
+    model.hidden_channels:  {type: pow2, low: 4, high: 8}            # 16-256
+    model.embedding_dim:    {type: pow2, low: 3, high: 6, at_most: model.hidden_channels}   # 8-min(64, hidden)
+    model.gnn_num_layers:   {type: int, low: 1, high: 4}
+    model.classifier_hidden_dims: {type: decreasing_pow2, min_layers: 1, max_layers: 3, low: 2, below: model.hidden_channels}   # first layer <= hidden/2
+    model.node_dropout:     {type: float, low: 0.0, high: 0.7, step: 0.05}
+    model.classifier_dropout: {type: float, low: 0.0, high: 0.7, step: 0.05}
+    model.edge_dropout:     {type: float, low: 0.0, high: 0.7, step: 0.05}
+    model.demo_embed_dim:   {type: pow2, low: 1, high: 3}            # 2-8
+    training.lr:            {type: float, low: 1.0e-4, high: 1.0e-2, log: true}
+    training.weight_decay:  {type: float, low: 1.0e-5, high: 1.0e-1, log: true}

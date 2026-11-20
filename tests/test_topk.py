@@ -1,26 +1,8 @@
-import os
-import sys
-
 import numpy as np
-import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from common.data import parse_region_map
 from common.graphs import build_graphs
 from topk.sparsify import (edge_retention, is_redundant, num_kept_edges, shared_edge_indices, tile_mask,
                            topk_edge_indices)
-
-REGION_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'region_names')
-
-
-@pytest.fixture
-def fc21():
-    rng = np.random.default_rng(0)
-    _, edge_list, _ = parse_region_map(os.path.join(REGION_DIR, 'FC21_regions.txt'))
-    X = rng.normal(0, 0.5, size=(8, len(edge_list))).astype(np.float32)
-    return edge_list, X
-
 
 def test_topk_selects_largest_abs(fc21):
     _, X = fc21

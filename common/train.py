@@ -11,13 +11,10 @@ from common.utils import EarlyStopping, calc_r2_corr
 
 def get_optimizer_params(model, weight_decay):
     """No weight decay on biases and norm layers (as in the notebook)."""
-    no_decay = ['bias', 'norm']
-    return [
-        {"params": [p for n, p in model.named_parameters() if not any(nd in n.lower() for nd in no_decay)],
-         "weight_decay": weight_decay},
-        {"params": [p for n, p in model.named_parameters() if any(nd in n.lower() for nd in no_decay)],
-         "weight_decay": 0.0},
-    ]
+    decay, no_decay = [], []
+    for name, param in model.named_parameters():
+        (no_decay if 'bias' in name.lower() or 'norm' in name.lower() else decay).append(param)
+    return [{"params": decay, "weight_decay": weight_decay}, {"params": no_decay, "weight_decay": 0.0}]
 
 
 def make_scheduler(optimizer, max_epochs, warmup_epochs):
@@ -74,8 +71,12 @@ def evaluate(model, loader, criterion, device, y_preprocessor):
     return metrics, actuals, preds, eids
 
 
-def fit(model, loaders, train_cfg, device, y_preprocessor):
-    """Train with early stopping on val MSE, restore the best weights, and evaluate all splits."""
+def fit(model, loaders, train_cfg, device, y_preprocessor, epoch_callback=None):
+    """Train with early stopping on val MSE, restore the best weights, and evaluate all splits.
+
+    epoch_callback(epoch, train_loss, val_loss), if given, is called after every epoch. It may raise to
+    abort training (e.g. optuna.TrialPruned for hyperparameter search).
+    """
     start = time.time()
     model = model.to(device)
     fwd_model = torch.compile(model, dynamic=True) if train_cfg['compile'] else model
@@ -100,6 +101,8 @@ def fit(model, loaders, train_cfg, device, y_preprocessor):
             val_losses.append(val_loss)
             pbar.set_postfix(train=f"{train_loss:.4f}", val=f"{val_loss:.4f}", es=early_stopping.counter)
 
+            if epoch_callback is not None:
+                epoch_callback(epoch, train_loss, val_loss)
             if early_stopping.step(val_loss, model, epoch):
                 break
 
@@ -115,6 +118,7 @@ def fit(model, loaders, train_cfg, device, y_preprocessor):
     return {
         'metrics': metrics,
         'best_epoch': early_stopping.best_epoch,
+        'best_val_loss': float(early_stopping.best_loss),
         'epochs_run': len(train_losses),
         'history': {'train_loss': train_losses, 'val_loss': val_losses, 'lr': lrs},
         'test_predictions': test_out,

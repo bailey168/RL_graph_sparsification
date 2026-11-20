@@ -29,10 +29,7 @@ def parse_region_map(region_file_path):
             src, dst = line.split("-")
         raw_pairs.append((src, dst))
 
-    node_names = []
-    for src, dst in raw_pairs:
-        if src not in node_names: node_names.append(src)
-        if dst not in node_names: node_names.append(dst)
+    node_names = list(dict.fromkeys(name for pair in raw_pairs for name in pair))   # first-appearance order
 
     node_to_idx = {name: idx for idx, name in enumerate(node_names)}
     edge_list = np.array([(node_to_idx[s], node_to_idx[d]) for s, d in raw_pairs], dtype=np.int64)
@@ -80,15 +77,11 @@ def extract_arrays(df, test, fc_type, cfg):
     if missing:
         raise ValueError(f"Missing {len(missing)} expected columns in CSV (e.g., {missing[:3]})")
 
-    X_raw = df[brain_cols]
-    if X_raw.isna().any().any():
-        raise ValueError("Missing data (NaNs) detected in the brain edge features.")
-    X_demo = df[demo_cols]
-    if X_demo.isna().any().any():
-        raise ValueError("Missing data (NaNs) detected in the demographic features.")
-    y = df[target_col]
-    if y.isna().any():
-        raise ValueError(f"Missing data (NaNs) detected in the target variable '{target_col}'.")
+    X_raw, X_demo, y = df[brain_cols], df[demo_cols], df[target_col]
+    for values, what in [(X_raw, "the brain edge features"), (X_demo, "the demographic features"),
+                         (y, f"the target variable '{target_col}'")]:
+        if values.isna().to_numpy().any():
+            raise ValueError(f"Missing data (NaNs) detected in {what}.")
 
     return {
         'X_raw': X_raw.to_numpy(dtype=np.float32),
@@ -144,20 +137,17 @@ def prepare_splits(arrays, split_idx, cfg):
 
     preprocessors = {'demo': demo_pre, 'y': y_pre}
 
-    needs_std = graph_cfg['edge_value'] == 'standardized'
-    if needs_std:
-        edge_pre = StandardScaler()
-        edge_pre.fit(arrays['X_raw'][tr])
-        preprocessors['edge'] = edge_pre
+    edge_pre = None
+    if graph_cfg['edge_value'] == 'standardized':
+        edge_pre = preprocessors['edge'] = StandardScaler().fit(arrays['X_raw'][tr])
 
     out = {}
     for name in SPLITS:
         idx = split_idx[name]
         X_raw = arrays['X_raw'][idx]
-        X_std = preprocessors['edge'].transform(X_raw).astype(np.float32) if needs_std else None
         out[name] = {
             'rank_scores': np.abs(X_raw),
-            'edge_vals': X_std if needs_std else X_raw,
+            'edge_vals': X_raw if edge_pre is None else edge_pre.transform(X_raw).astype(np.float32),
             'demo': demo_pre.transform(arrays['X_demo'].iloc[idx]).astype(np.float32),
             'y': y_pre.transform(arrays['y'][idx].reshape(-1, 1)).flatten().astype(np.float32),
             'eids': arrays['eids'][idx],

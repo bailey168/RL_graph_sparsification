@@ -1,12 +1,9 @@
 import os
-import sys
 
 import numpy as np
 import pytest
 import torch
 from torch_geometric.loader import DataLoader
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from common.data import parse_region_map
 from common.graphs import build_graphs, dense_gcn_adj, signed_gcn_norm
@@ -16,13 +13,11 @@ from topk.sparsify import topk_edge_indices
 REGION_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'region_names')
 
 
-@pytest.fixture
-def fc21():
-    rng = np.random.default_rng(0)
-    node_names, edge_list, _ = parse_region_map(os.path.join(REGION_DIR, 'FC21_regions.txt'))
-    n_subj = 8
-    X = rng.normal(0, 0.5, size=(n_subj, len(edge_list))).astype(np.float32)
-    return node_names, edge_list, X
+def keep_mask(X, top_idx):
+    """(N, E) bool mask with the kept edges set."""
+    mask = np.zeros_like(X, dtype=bool)
+    np.put_along_axis(mask, top_idx, True, axis=1)
+    return mask
 
 
 def test_region_maps():
@@ -35,7 +30,7 @@ def test_region_maps():
 
 @pytest.mark.parametrize('keep_frac', [0.1, 0.5, 1.0])
 def test_graph_structure(fc21, keep_frac):
-    _, edge_list, X = fc21
+    edge_list, X = fc21
     num_nodes = 21
     top_idx = topk_edge_indices(np.abs(X), keep_frac)
     k = top_idx.shape[1]
@@ -73,7 +68,7 @@ def test_no_self_loops_isolated_nodes_finite():
 
 @pytest.mark.parametrize('pooling,include_demo', [('attention', True), ('mean', False)])
 def test_model_forward(fc21, pooling, include_demo):
-    _, edge_list, X = fc21
+    edge_list, X = fc21
     demo = np.random.default_rng(1).normal(size=(len(X), 5)).astype(np.float32)
     graphs = build_graphs(X, topk_edge_indices(np.abs(X), 0.3), demo, np.zeros(len(X), np.float32),
                           np.arange(len(X)), edge_list, 21)
@@ -89,10 +84,9 @@ def test_model_forward(fc21, pooling, include_demo):
 
 @pytest.mark.parametrize('keep_frac,self_loop_weight', [(0.1, 1.0), (0.5, 0.5), (1.0, 1.0), (0.05, 0.0)])
 def test_dense_adj_matches_sparse_norm(fc21, keep_frac, self_loop_weight):
-    _, edge_list, X = fc21
+    edge_list, X = fc21
     top_idx = topk_edge_indices(np.abs(X), keep_frac)
-    mask = np.zeros_like(X, dtype=bool)
-    np.put_along_axis(mask, top_idx, True, axis=1)
+    mask = keep_mask(X, top_idx)
     adj = dense_gcn_adj(torch.from_numpy(X).double(), torch.from_numpy(edge_list).long(), 21,
                         self_loop_weight, mask=torch.from_numpy(mask))
     for i in range(len(X)):
@@ -106,7 +100,7 @@ def test_dense_adj_matches_sparse_norm(fc21, keep_frac, self_loop_weight):
 @pytest.mark.parametrize('pooling,include_demo,keep_frac', [('attention', True, 0.3), ('mean', False, 1.0),
                                                             ('attention', False, 0.05)])
 def test_forward_dense_matches_forward(fc21, pooling, include_demo, keep_frac):
-    _, edge_list, X = fc21
+    edge_list, X = fc21
     demo = np.random.default_rng(1).normal(size=(len(X), 5)).astype(np.float32)
     top_idx = topk_edge_indices(np.abs(X), keep_frac)
     graphs = build_graphs(X, top_idx, demo, np.zeros(len(X), np.float32), np.arange(len(X)), edge_list, 21)
@@ -122,11 +116,52 @@ def test_forward_dense_matches_forward(fc21, pooling, include_demo, keep_frac):
             bn.running_var.uniform_(0.5, 2.0)
     model.eval()
 
-    mask = np.zeros_like(X, dtype=bool)
-    np.put_along_axis(mask, top_idx, True, axis=1)
+    mask = keep_mask(X, top_idx)
     adj = dense_gcn_adj(torch.from_numpy(X), torch.from_numpy(edge_list).long(), 21, 1.0,
                         mask=torch.from_numpy(mask))
     with torch.no_grad():
         expected = model(batch)
         got = model.forward_dense(adj, torch.from_numpy(demo))
     torch.testing.assert_close(got, expected, atol=1e-5, rtol=1e-5)
+
+
+def _small_model(edge_dropout):
+    torch.manual_seed(0)
+    return GCNNet(num_nodes=21, embedding_dim=8, hidden_channels=16, gnn_num_layers=2,
+                  classifier_hidden_dims=[8], node_dropout=0.0, classifier_dropout=0.0,
+                  include_demo=True, demo_dim=5, demo_embed_dim=4, edge_dropout=edge_dropout)
+
+
+def test_edge_dropout(fc21):
+    edge_list, X = fc21
+    demo = np.random.default_rng(1).normal(size=(len(X), 5)).astype(np.float32)
+    graphs = build_graphs(X, topk_edge_indices(np.abs(X), 0.5), demo, np.zeros(len(X), np.float32),
+                          np.arange(len(X)), edge_list, 21)
+    batch = next(iter(DataLoader(graphs, batch_size=len(graphs))))
+
+    # Eval: edge dropout is a no-op, output identical to a model without it
+    off, on = _small_model(0.0).eval(), _small_model(0.5).eval()
+    with torch.no_grad():
+        torch.testing.assert_close(on(batch), off(batch))
+
+    # Train: self-loops untouched; other entries are either 0 or scaled by 1/(1-p)
+    model = _small_model(0.5).train()
+    torch.manual_seed(1)
+    w = model.drop_edges(batch.edge_index, batch.edge_weight)
+    loops = batch.edge_index[0] == batch.edge_index[1]
+    torch.testing.assert_close(w[loops], batch.edge_weight[loops])
+    kept = (w != 0) & ~loops
+    torch.testing.assert_close(w[kept], batch.edge_weight[kept] * 2.0)
+    frac_dropped = ((w == 0) & ~loops & (batch.edge_weight != 0)).float().sum() / (~loops).float().sum()
+    assert 0.35 < frac_dropped < 0.65
+
+    # Dense path: diagonal kept, off-diagonal dropped/scaled
+    adj = torch.rand(4, 21, 21)
+    model.edge_dropout = 0.5
+    with torch.no_grad():
+        model.forward_dense(adj, torch.zeros(4, 5))   # runs in train mode without error
+    model.eval()   # same model (BatchNorm stats were updated above) with and without edge dropout
+    with torch.no_grad():
+        with_p = model.forward_dense(adj, torch.zeros(4, 5))
+        model.edge_dropout = 0.0
+        torch.testing.assert_close(with_p, model.forward_dense(adj, torch.zeros(4, 5)))

@@ -52,6 +52,7 @@ model:
   gnn_num_layers: 3
   classifier_hidden_dims: [32, 16]
   node_dropout: 0.3
+  edge_dropout: 0.0       # DropEdge on non-self-loop edges during training (0 = off)
   classifier_dropout: 0.3
   pooling: attention      # attention | mean
   include_demo: true

@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, ROOT)
 
 from common.data import parse_region_map
 
@@ -86,12 +85,13 @@ def test_sweep_end_to_end(tmp_path):
     assert len(test0) == len(test1) and not np.array_equal(np.sort(test0), np.sort(test1))
 
     # Rerun skips completed runs
+    assert (out / 'summary' / 'test_r2_vs_keep.png').exists()
     proc = run_sweep(tmp_path)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert 'All runs complete' in proc.stdout
     assert len(pd.read_csv(out / 'results.csv')) == 16
 
-    # summarize.py runs on the real output and writes both figures
+    # The sweep summarized itself at the end; summarize.py also runs on its own
     proc = subprocess.run([sys.executable, os.path.join(ROOT, 'topk', 'summarize.py'),
                            '--results', str(out / 'results.csv'), '--out-dir', str(out / 'summary')],
                           capture_output=True, text=True, cwd=ROOT)
