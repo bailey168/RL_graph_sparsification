@@ -17,7 +17,7 @@ sweep:
   masks: [personal]   # --masks overrides
 
 optuna:
-  n_trials: 50            # finished (complete + pruned) trials per study; reruns top up to this number
+  n_trials: 30            # finished (complete + pruned) trials per study; reruns top up to this number
   seed: 0                 # split seed = training seed = sampler seed (seed-0 split is the one the RL stage uses)
   direction: minimize     # objective: best val MSE (scaled target) from early stopping
   sampler:                # TPE
@@ -32,13 +32,13 @@ optuna:
   # Dotted config keys -> spec. Fixed (not searched): model.pooling (attention), graph.self_loop_weight, training.batch_size,
   # training.warmup_epochs, training.max_epochs, early stopping, graph.edge_value.
   search_space:
-    model.hidden_channels:  {type: pow2, low: 4, high: 8}            # 16-256
+    model.hidden_channels:  {type: pow2, low: 4, high: 7}            # 16-256
     model.embedding_dim:    {type: pow2, low: 3, high: 6, at_most: model.hidden_channels}   # 8-min(64, hidden)
-    model.gnn_num_layers:   {type: int, low: 1, high: 4}
+    model.gnn_num_layers:   {type: int, low: 1, high: 3}
     model.classifier_hidden_dims: {type: decreasing_pow2, min_layers: 1, max_layers: 3, low: 2, below: model.hidden_channels}   # first layer <= hidden/2
     model.node_dropout:     {type: float, low: 0.0, high: 0.7, step: 0.05}
     model.classifier_dropout: {type: float, low: 0.0, high: 0.7, step: 0.05}
     model.edge_dropout:     {type: float, low: 0.0, high: 0.7, step: 0.05}
     model.demo_embed_dim:   {type: pow2, low: 1, high: 3}            # 2-8
-    training.lr:            {type: float, low: 1.0e-4, high: 1.0e-2, log: true}
+    training.lr:            {type: float, low: 3.0e-4, high: 1.0e-2, log: true}
     training.weight_decay:  {type: float, low: 1.0e-5, high: 1.0e-1, log: true}
