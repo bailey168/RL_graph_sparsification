@@ -1,9 +1,9 @@
 """Top-K sweep where each (FC, test, mask, keep) level gets its own Optuna hyperparameter search.
 
-For every study the graphs are built once, then `optuna.n_trials` trials train a GCN with sampled
-model/optimizer hyperparameters (search space in the config). The objective is the best val MSE from
-early stopping; test metrics are recorded per trial but never used for selection. All trials use one
-seed (optuna.seed) for the split, the training and the sampler. The best trial's weights are the final
+For every study the graphs are built once, then `optuna.n_trials` trials train a GNN (GCN or GATv2, set by
+model.type) with sampled model/optimizer hyperparameters (search space in the config). The objective is
+the best val MSE from early stopping; test metrics are recorded per trial but never used for selection.
+All trials use one seed (optuna.seed) for the split, the training and the sampler. The best trial's weights are the final
 model for that sparsity level.
 
 Output per study, {output_dir}/{FC}/{TEST}/{mask}/keep{pp}/:
@@ -16,8 +16,17 @@ At the end, topk/summarize.py runs on results.csv into {output_dir}/summary/ (un
 
 A study with study.db but no metrics.json is resumed and topped up to n_trials finished trials.
 
+The model is set by model.type: configs/topk_optuna.yaml tunes the GCN, configs/topk_gat_optuna.yaml the
+GATv2 (same search space plus attention heads, separate output dir).
+
+Speed: batches are assembled on the GPU (training.loader: tensor; identical results to the PyG loader).
+Studies are independent, so several can share one GPU as separate processes with identical results, e.g.
+    for k in 1.0 0.8 0.6; do python topk/run_optuna.py --config configs/topk_gat_optuna.yaml --keep $k --no-summary & done; wait
+    python topk/summarize.py --config configs/topk_gat_optuna.yaml
+
 Example:
     python topk/run_optuna.py --fc FC21 --tests GF --keep 0.1 1.0 --max-subjects 2000 --n-trials 5 --max-epochs 5
+    python topk/run_optuna.py --config configs/topk_gat_optuna.yaml --tests GF --keep 1.0
 """
 import argparse
 import gc
@@ -38,14 +47,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from common.config import load_config, snapshot
 from common.data import SPLITS, load_subject_table, make_split, save_split
-from common.models import build_model
+from common.models import build_model, graph_format
 from common.train import fit
 from common.tuning import (config_from_params, count_states, flatten_values, is_new_best, make_study,
                            progress_callback, pruner_enabled, pruning_callback, remaining_trials, save_study_outputs,
                            suggest_config)
 from common.utils import set_deterministic_training
 from topk.run_sweep import (append_row, build_split_graphs, free_memory, keep_dir, make_loaders, prepare_fc,
-                            result_row, save_history, save_mask, select_edges, write_json)
+                            result_row, save_history, save_mask, select_edges, stage_graphs, write_json)
 from topk.sparsify import is_redundant
 from topk.summarize import auto_summarize
 
@@ -69,10 +78,10 @@ def parse_args():
     return parser.parse_args()
 
 
-def train_trial(trial_cfg, graphs, demo_dim, num_nodes, seed, device, y_pre, epoch_callback=None):
+def train_trial(trial_cfg, staged, demo_dim, num_nodes, seed, device, y_pre, epoch_callback=None):
     generator = set_deterministic_training(seed)
     train_cfg = trial_cfg['training']
-    loaders = make_loaders(graphs, train_cfg['batch_size'], train_cfg['num_workers'], generator)
+    loaders = make_loaders(staged, train_cfg['batch_size'], train_cfg['num_workers'], generator)
     model = build_model(trial_cfg['model'], num_nodes, demo_dim)
     result = fit(model, loaders, train_cfg, device, y_pre, epoch_callback=epoch_callback)
     return model, result
@@ -108,12 +117,14 @@ def run_study(cfg, fc_type, test, mask, keep_frac, prepared, preprocessors, arra
     os.makedirs(study_dir, exist_ok=True)
 
     top_idx, shared = select_edges(prepared, keep_frac, mask)
-    graphs = build_split_graphs(prepared, top_idx, arrays['edge_list'], num_nodes, cfg['graph']['self_loop_weight'])
+    graphs = build_split_graphs(prepared, top_idx, arrays['edge_list'], num_nodes, cfg['graph']['self_loop_weight'],
+                                graph_format(cfg['model']))
+    staged = stage_graphs(graphs, cfg['training'], device)   # once per study, shared by every trial
 
     def objective(trial):
         trial_cfg, values = suggest_config(trial, cfg, space)
         try:
-            model, result = train_trial(trial_cfg, graphs, demo_dim, num_nodes, seed, device, y_pre,
+            model, result = train_trial(trial_cfg, staged, demo_dim, num_nodes, seed, device, y_pre,
                                         epoch_callback=pruning_callback(trial))
         except FloatingPointError as e:   # non-finite loss: treat as a bad region of the search space
             trial.set_user_attr('error', repr(e))
@@ -148,7 +159,7 @@ def run_study(cfg, fc_type, test, mask, keep_frac, prepared, preprocessors, arra
     if saved is None or saved['trial_number'] != best.number:
         # e.g. the process died between writing a checkpoint and Optuna recording the trial
         print(f"  Checkpoint does not match best trial #{best.number}; retraining it (same seed)")
-        model, result = train_trial(best_cfg, graphs, demo_dim, num_nodes, seed, device, y_pre)
+        model, result = train_trial(best_cfg, staged, demo_dim, num_nodes, seed, device, y_pre)
         write_best_artifacts(study_dir, best.number, model, result)
         saved = read_best_trial(study_dir)
 

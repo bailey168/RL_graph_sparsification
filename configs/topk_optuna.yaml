@@ -9,11 +9,12 @@ paths:
 sweep:
   fc: [FC55]              # FC types / tests to run by default (--fc / --tests override)
   tests: [GF, DSST]
-  keep_fracs: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]   # --keep overrides
+  # keep_fracs: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]   # --keep overrides
+  keep_fracs: [1.0, 0.8, 0.6, 0.4, 0.2, 0.0]
   # personal: each subject keeps its own top-K by |raw FC|
   # shared: one edge set for everyone (edges most often in train subjects' personal top-K)
   # shared is skipped at keep 0.0 and 1.0 (same graphs as personal) -> 11 + 9 = 20 studies per FC x test
-  masks: [personal, shared]   # --masks overrides
+  masks: [personal]   # --masks overrides
 
 optuna:
   n_trials: 50            # finished (complete + pruned) trials per study; reruns top up to this number

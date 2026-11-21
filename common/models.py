@@ -1,18 +1,19 @@
 import torch
 import torch.nn.functional as F
 import torch_geometric.nn as pyg_nn
-from torch_geometric.nn import GCNConv, global_mean_pool
+from torch_geometric.nn import GATv2Conv, GCNConv, global_mean_pool
 from torch_geometric.nn.aggr import AttentionalAggregation
 
 
-class GCNNet(torch.nn.Module):
-    """Node-ID embedding -> GCNConv stack -> graph pooling -> (+ demographics) -> MLP head.
+class _GraphNet(torch.nn.Module):
+    """Shared skeleton: node-ID embedding -> conv stack -> graph pooling -> (+ demographics) -> MLP head.
 
-    Mirrors GATv2ConvNet in others/gnn/architectures_normal.py. Edge weights are expected to be
-    pre-normalized (see graphs.signed_gcn_norm), so GCNConv runs with normalize=False.
+    Mirrors GATv2ConvNet in others/gnn/architectures_normal.py. Subclasses supply the conv layer through
+    `make_conv(in_dim, out_dim)` and implement forward(). Module creation order (embedding, convs, norms,
+    pool, demographics, head) and parameter names are fixed so existing GCN checkpoints still load.
     """
 
-    def __init__(self, num_nodes, embedding_dim, hidden_channels, gnn_num_layers,
+    def __init__(self, make_conv, num_nodes, embedding_dim, hidden_channels, gnn_num_layers,
                  classifier_hidden_dims, node_dropout, classifier_dropout, pooling='attention',
                  include_demo=True, demo_dim=0, demo_embed_dim=8, out_dim=1, edge_dropout=0.0):
         super().__init__()
@@ -26,8 +27,7 @@ class GCNNet(torch.nn.Module):
         self.node_embedding = torch.nn.Embedding(num_embeddings=num_nodes, embedding_dim=embedding_dim)
 
         self.conv_layers = torch.nn.ModuleList([
-            GCNConv(embedding_dim if i == 0 else hidden_channels, hidden_channels,
-                    normalize=False, add_self_loops=False)
+            make_conv(embedding_dim if i == 0 else hidden_channels, hidden_channels)
             for i in range(gnn_num_layers)
         ])
         # Norm + activation after every conv layer except the last
@@ -83,6 +83,36 @@ class GCNNet(torch.nn.Module):
                     if module.bias is not None:
                         torch.nn.init.zeros_(module.bias)
 
+    def _post_conv(self, i, x):
+        """BatchNorm -> ELU -> dropout after every conv layer except the last. x: (nodes, H)."""
+        if i == self.gnn_num_layers - 1:
+            return x
+        x = F.elu(self.batch_norms[i](x))
+        return F.dropout(x, p=self.node_dropout, training=self.training)
+
+    def _pool(self, x, batch):
+        return self.pool(x, batch) if self.pool is not None else global_mean_pool(x, batch)
+
+    def _readout(self, graph_features, demographics):
+        """(+ projected demographics) -> MLP head."""
+        if self.include_demo:
+            graph_features = torch.cat([graph_features, self.demo_projection(demographics)], dim=1)
+        out = self.classifier(graph_features)
+        return out.squeeze(-1) if self.out_dim == 1 else out
+
+
+class GCNNet(_GraphNet):
+    """GCNConv model. Edge weights are expected to be pre-normalized (see graphs.signed_gcn_norm), so
+    GCNConv runs with normalize=False and add_self_loops=False."""
+
+    def __init__(self, num_nodes, embedding_dim, hidden_channels, gnn_num_layers,
+                 classifier_hidden_dims, node_dropout, classifier_dropout, pooling='attention',
+                 include_demo=True, demo_dim=0, demo_embed_dim=8, out_dim=1, edge_dropout=0.0):
+        super().__init__(
+            lambda i, o: GCNConv(i, o, normalize=False, add_self_loops=False),
+            num_nodes, embedding_dim, hidden_channels, gnn_num_layers, classifier_hidden_dims, node_dropout,
+            classifier_dropout, pooling, include_demo, demo_dim, demo_embed_dim, out_dim, edge_dropout)
+
     def drop_edges(self, edge_index, edge_weight):
         """DropEdge as inverted dropout on the normalized weights: during training, each non-self-loop entry
         is zeroed with probability edge_dropout and survivors are scaled by 1/(1-p). Self-loops are always
@@ -92,20 +122,6 @@ class GCNNet(torch.nn.Module):
         is_edge = edge_index[0] != edge_index[1]
         return torch.where(is_edge, F.dropout(edge_weight, p=self.edge_dropout, training=True), edge_weight)
 
-    def _post_conv(self, i, x):
-        """BatchNorm -> ELU -> dropout after every conv layer except the last. x: (nodes, H)."""
-        if i == self.gnn_num_layers - 1:
-            return x
-        x = F.elu(self.batch_norms[i](x))
-        return F.dropout(x, p=self.node_dropout, training=self.training)
-
-    def _readout(self, graph_features, demographics):
-        """(+ projected demographics) -> MLP head."""
-        if self.include_demo:
-            graph_features = torch.cat([graph_features, self.demo_projection(demographics)], dim=1)
-        out = self.classifier(graph_features)
-        return out.squeeze(-1) if self.out_dim == 1 else out
-
     def forward(self, data):
         x = self.node_embedding(data.x)
         edge_weight = self.drop_edges(data.edge_index, data.edge_weight)
@@ -113,8 +129,7 @@ class GCNNet(torch.nn.Module):
         for i, conv in enumerate(self.conv_layers):
             x = self._post_conv(i, conv(x, data.edge_index, edge_weight=edge_weight))
 
-        graph_features = self.pool(x, data.batch) if self.pool is not None else global_mean_pool(x, data.batch)
-        return self._readout(graph_features, data.demographics)
+        return self._readout(self._pool(x, data.batch), data.demographics)
 
     def forward_dense(self, adj, demographics=None):
         """Same computation as forward(), on a dense normalized adjacency (B, N, N).
@@ -140,8 +155,53 @@ class GCNNet(torch.nn.Module):
         return self._readout(graph_features, demographics)
 
 
+class GATv2Net(_GraphNet):
+    """GATv2Conv model: GATv2ConvNet from others/gnn/architectures_normal.py without inject or jumping knowledge.
+
+    Each edge carries its (z-scored) value as a 1-d `edge_attr`, which enters the attention logits only.
+    Graphs come without self-loops (graphs.build_graphs(graph_format='edge_attr')); GATv2Conv adds them,
+    using the mean incoming edge_attr as their attribute (0 for isolated nodes, e.g. everywhere at keep 0.0).
+    Heads are averaged (concat=False), every layer has a residual connection, and `edge_dropout` is GATv2's
+    attention dropout. There is no dense forward: the RL inference path supports GCN only for now.
+    """
+
+    def __init__(self, num_nodes, embedding_dim, hidden_channels, gnn_num_layers,
+                 classifier_hidden_dims, node_dropout, classifier_dropout, heads=4, pooling='attention',
+                 include_demo=True, demo_dim=0, demo_embed_dim=8, out_dim=1, edge_dropout=0.0):
+        super().__init__(
+            lambda i, o: GATv2Conv(i, o, heads=heads, concat=False, edge_dim=1, residual=True,
+                                   dropout=edge_dropout, add_self_loops=True, fill_value='mean'),
+            num_nodes, embedding_dim, hidden_channels, gnn_num_layers, classifier_hidden_dims, node_dropout,
+            classifier_dropout, pooling, include_demo, demo_dim, demo_embed_dim, out_dim, edge_dropout)
+        self.heads = heads
+
+    def forward(self, data):
+        x = self.node_embedding(data.x)
+        for i, conv in enumerate(self.conv_layers):
+            x = self._post_conv(i, conv(x, data.edge_index, edge_attr=data.edge_attr))
+        return self._readout(self._pool(x, data.batch), data.demographics)
+
+
+MODEL_TYPES = {'gcn': GCNNet, 'gatv2': GATv2Net}
+GRAPH_FORMATS = {'gcn': 'gcn_norm', 'gatv2': 'edge_attr'}
+
+
+def model_type(model_cfg):
+    kind = model_cfg.get('type', 'gcn')
+    if kind not in MODEL_TYPES:
+        raise ValueError(f"Unknown model.type '{kind}' (expected one of {sorted(MODEL_TYPES)})")
+    return kind
+
+
+def graph_format(model_cfg):
+    """Edge format build_graphs must produce for this model: 'gcn_norm' (signed-normalized edge_weight with
+    self-loops) or 'edge_attr' (raw edge values as edge_attr, no self-loops)."""
+    return GRAPH_FORMATS[model_type(model_cfg)]
+
+
 def build_model(model_cfg, num_nodes, demo_dim):
-    return GCNNet(
+    kind = model_type(model_cfg)
+    kwargs = dict(
         num_nodes=num_nodes,
         embedding_dim=model_cfg['embedding_dim'],
         hidden_channels=model_cfg['hidden_channels'],
@@ -155,3 +215,6 @@ def build_model(model_cfg, num_nodes, demo_dim):
         demo_embed_dim=model_cfg['demo_embed_dim'],
         edge_dropout=model_cfg.get('edge_dropout', 0.0),
     )
+    if kind == 'gatv2':
+        kwargs['heads'] = model_cfg['heads']
+    return MODEL_TYPES[kind](**kwargs)

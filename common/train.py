@@ -28,16 +28,29 @@ def make_scheduler(optimizer, max_epochs, warmup_epochs):
 
 
 def train_epoch(model, loader, optimizer, criterion, device):
+    """Mean train loss. The per-batch sum is kept as a float64 tensor (same IEEE ops and order as summing
+    Python floats) so there is one host sync per epoch instead of one per batch."""
     model.train()
-    total_loss = 0.0
+    total_loss = torch.zeros((), dtype=torch.float64, device=device)
     for data in loader:
         data = data.to(device)
         optimizer.zero_grad()
         loss = criterion(model(data), data.y.view(-1))
         loss.backward()
         optimizer.step()
-        total_loss += loss.item() * data.num_graphs
-    return total_loss / len(loader.dataset)
+        total_loss += loss.detach().double() * data.num_graphs
+    return total_loss.item() / len(loader.dataset)
+
+
+@torch.no_grad()
+def eval_loss(model, loader, criterion, device):
+    """Mean loss only (the per-epoch val pass); same value as predict()[0] without copying outputs to the host."""
+    model.eval()
+    total_loss = torch.zeros((), dtype=torch.float64, device=device)
+    for data in loader:
+        data = data.to(device)
+        total_loss += criterion(model(data), data.y.view(-1)).double() * data.num_graphs
+    return total_loss.item() / len(loader.dataset)
 
 
 @torch.no_grad()
@@ -92,7 +105,7 @@ def fit(model, loaders, train_cfg, device, y_preprocessor, epoch_callback=None):
             train_loss = train_epoch(fwd_model, loaders['train'], optimizer, criterion, device)
             lrs.append(optimizer.param_groups[0]['lr'])
             scheduler.step()
-            val_loss, _, _, _ = predict(fwd_model, loaders['val'], criterion, device)
+            val_loss = eval_loss(fwd_model, loaders['val'], criterion, device)
 
             if not (np.isfinite(train_loss) and np.isfinite(val_loss)):
                 raise FloatingPointError(f"Non-finite loss at epoch {epoch} (train={train_loss}, val={val_loss})")

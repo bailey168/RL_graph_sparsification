@@ -1,0 +1,16 @@
+# Optuna-tuned top-K sweep with the GATv2 model (topk/run_optuna.py --config configs/topk_gat_optuna.yaml).
+# Inherits everything from topk_optuna.yaml (scope, trials, seed, sampler and the GCN search space); only the
+# keys below change, so GCN and GATv2 are compared on the same splits, masks and search ranges.
+# GATv2 graphs carry the z-scored edge values as edge_attr (attention logits only); GATv2Conv adds its own
+# self-loops, so graph.self_loop_weight is unused. model.edge_dropout is GATv2's attention dropout here.
+base: topk_optuna.yaml
+
+paths:
+  output_dir: /scratch/bng/cartbind/data/RL_outputs/topk_gat_optuna
+
+model:
+  type: gatv2
+
+optuna:
+  search_space:            # merged into the inherited search space
+    model.heads:          {type: pow2, low: 1, high: 3}            # 2-8 attention heads (averaged, concat=False)

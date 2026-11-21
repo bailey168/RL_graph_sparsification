@@ -41,7 +41,7 @@ common/          # shared by every sparsification method (top-K now, RL later)
   config.py      # load_config(path, overrides) -> dict; FC_TYPES / TARGETS maps
   data.py        # parse_region_map, load_subject_table, make_split, fit_preprocessors
   graphs.py      # signed_gcn_norm(...), build_graphs(...) -> list[Data]
-  models.py      # GCNNet
+  models.py      # GCNNet, GATv2Net (model.type), build_model, graph_format
   train.py       # train_epoch, evaluate, fit (early stopping, scheduler), get_optimizer_params
   utils.py       # set_deterministic_training, calc_r2_corr, EarlyStopping (adapted from others/)
 topk/            # top-K edge-weight thresholding baseline
@@ -146,6 +146,10 @@ The CLI can override any key (e.g. `--set training.lr=0.001`).
 - [x] Optuna-tuned sweep code (2026-11-19, see below), 28 tests pass
 - [x] Optuna scope narrowed to FC55 × {GF, DSST}, pooling fixed, edge dropout added, auto-summary (2026-11-19), 29 tests pass
 - [ ] Optuna cluster smoke test, then the full 40-study run (summary is written automatically)
+- [x] GATv2 model option + `configs/topk_gat_optuna.yaml` (2026-11-21, see below), 43 tests pass
+- [ ] GATv2 Optuna: cluster smoke test, then GF keep 1.0 (compare with the GCN study), then the full 40 studies
+- [x] Faster training with identical results (2026-11-21, see below): device-resident tensor loader, cheaper epoch loop, file-locked CSV appends for parallel studies
+- [ ] Speed check on a cluster GPU: `python tests/bench_training.py --device cuda`, then a 3-trial smoke study with `--set training.loader=pyg` vs the default, diffing trials.csv/metrics.json
 
 ## Usage
 ```bash
@@ -160,7 +164,40 @@ python topk/summarize.py --set paths.output_dir=outputs/topk_sl05               
 python topk/run_optuna.py --tests GF --keep 0.1 1.0 --max-subjects 2000 --n-trials 5 --max-epochs 5   # smoke
 python topk/run_optuna.py --tests GF                           # one cluster job per test; resumable; summarizes at the end
 python topk/summarize.py --config configs/topk_optuna.yaml     # re-summarize by hand (e.g. after parallel jobs)
+# GATv2 instead of GCN: same scope and search space + heads, separate output dir (topk_gat_optuna)
+python topk/run_optuna.py --config configs/topk_gat_optuna.yaml --tests GF --keep 0.0 1.0 --max-subjects 2000 --n-trials 3 --max-epochs 5   # smoke
+python topk/run_optuna.py --config configs/topk_gat_optuna.yaml --tests GF --keep 1.0   # first real check vs GCN
+python topk/run_sweep.py --set model.type=gatv2 model.heads=4 paths.output_dir=...      # fixed-hyperparameter GAT sweep
 ```
+
+## Review (2026-11-21): new top-K/Optuna code vs old GAT notebook, no code changes
+Question: why the Optuna top-K results show no clear R²-vs-keep pattern and are worse than the old GAT.
+- **Matches the old notebook** (`GNN_all_scaling_law_optuna_nocv.ipynb`): 70/15/15 split, train-only scalers (edges z-scored before top-K), top-K by |raw FC| with `k = max(1, floor(p·E))` and z-values on the edges, AdamW with no decay on bias/norm, warmup + cosine, early stopping on val MSE, best-state restore. No bugs found.
+- **Differs (likely cause of the gap):**
+  1. Model: old = `GATv2ConvNet_Inject` (`edge_attr` enters the attention logits only, `residual=True`, GATv2 adds self-loops, demographics injected into node features between conv layers, no demographics at readout). New = `GCNConv` with signed sym-normalized z-scores *multiplying* messages and demographics concatenated at readout.
+  2. Search space: old lr 1e-3–3e-2, hidden 32–128, embedding ≥ 32, 2–4 conv layers, 100 trials. New lr 1e-4–1e-2, hidden 16–256, embedding ≥ 8, 1–4 layers, 50 trials.
+  3. The old "fewer edges → worse" impression came from `sparsity_percent` (0.3–1.0) being *one tuned hyperparameter inside a single study* (`GNN_all_scaling_law_optuna.ipynb`), which mixes keep level with the other params and with TPE sampling. It was not a controlled comparison. The notebooks have no saved outputs, so the old numbers can't be checked here.
+- Suggested next checks (not done): Δ test R² vs keep 0.0 (if ≈ 0, the GCN isn't using FC); a ridge baseline on masked edges + demographics per keep level; a GATv2 option in `common/models.py` run through the same pipeline at keep 1.0 to separate the model's effect from the pipeline's.
+
+## Change (2026-11-21): GATv2 model option + Optuna-tuned GATv2 sweep
+Why: the review above found the model is the main difference from the old GAT notebook. GATv2 now runs through the same top-K + Optuna pipeline, so GCN and GAT are compared on identical splits, masks and search ranges.
+
+| Topic | Decision |
+|---|---|
+| Architecture | `GATv2Net` in `common/models.py`: `GATv2ConvNet` from `others/gnn/architectures_normal.py` **without inject or jumping knowledge**. Node-ID embedding → `gnn_num_layers` × `GATv2Conv(edge_dim=1, residual=True, concat=False, heads=H, add_self_loops=True, fill_value='mean')` → BatchNorm → ELU → dropout (not after the last layer) → attention pooling → + demographics projection → MLP head. |
+| Selection | `model.type: gcn \| gatv2` (default `gcn`). `build_model` dispatches on it, and `graph_format(model_cfg)` tells `build_graphs` which edge format to build. |
+| Edge input | `graph_format='edge_attr'`: kept **z-scored** edge values as `edge_attr` (2k × 1), both directions, no self-loops, no GCN normalization. They enter the attention logits only. GATv2Conv adds self-loops whose attr is the mean incoming attr (0 for isolated nodes and everywhere at keep 0.0). `graph.self_loop_weight` is unused for GAT. |
+| `edge_dropout` | GATv2 **attention dropout** (`GATv2Conv(dropout=...)`), as in the reference. Unlike GCN's DropEdge, it can also drop self-loop attention. |
+| Search space | Inherited GCN space **plus** `model.heads` (pow2 1–4 → 2–16). No hidden-size constraint because heads are averaged. |
+| RL dense path | Deferred: `GATv2Net` has no `forward_dense`, and `predict_dense` raises `NotImplementedError` for it. |
+| Scope | `configs/topk_gat_optuna.yaml` (`base: topk_optuna.yaml`): same FC55 × {GF, DSST} × 20 masks/keeps = 40 studies, 50 trials, seed 0, output `/scratch/bng/cartbind/data/RL_outputs/topk_gat_optuna`. |
+
+Files:
+- `common/models.py`: shared `_GraphNet` base (embedding, norms, pooling, demographics, head, init, `_post_conv`, `_readout`); `GCNNet` and `GATv2Net` supply the conv layer. GCN parameter names, module order and initialization are unchanged: the state_dict at a fixed seed is bit-identical to the old code, so old `model.pt` files load.
+- `common/graphs.py`: `build_graphs(..., graph_format='gcn_norm' | 'edge_attr')`.
+- `topk/run_sweep.py` / `run_optuna.py`: `build_split_graphs(..., graph_format)` is fed from `graph_format(cfg['model'])`, so the fixed sweep can also run GAT (`--set model.type=gatv2`).
+- `configs/topk.yaml`: + `model.type: gcn`, `model.heads: 4`. New `configs/topk_gat_optuna.yaml`. `common/infer.py`: clear error for models without `forward_dense`.
+- Tests: edge_attr graph structure (keep 0.0 → empty), GATv2 forward/backward (incl. keep 0.0), sensitivity to edge values, attention dropout off in eval, `build_model` dispatch, and an end-to-end GAT Optuna run (`tests/test_topk_optuna_pipeline.py::test_gat_optuna_sweep`). 43 tests pass.
 
 ## Change (2026-11-09): summarize.py reads paths from config
 - `topk/summarize.py` now takes `--config` and `--set` and defaults `--results` to `{paths.output_dir}/results.csv` and `--out-dir` to `{paths.output_dir}/summary`. Previously it was hardcoded to `outputs/topk/`, which didn't match the config's output dir on scratch.
@@ -247,3 +284,12 @@ Files:
 - Smaller cleanups in `common/data.py`, `common/train.py` and `topk/summarize.py` (`save_fig`, `fc_colors`, `LINESTYLES`).
 - Tests: `tests/conftest.py` holds the shared `fc21` fixture, and `pytest.ini` sets `pythonpath = .` (no more `sys.path` hacks in test files).
 - Verified: all 31 tests pass. Synthetic `run_sweep.py` and `run_optuna.py` outputs (results.csv, metrics.json, model.pt tensors, splits, masks, Optuna trials) are identical to the pre-refactor code, apart from timing fields.
+
+## Change (2026-11-21): faster training, bit-identical results
+Goal: speed up the Optuna GATv2 runs (one GPU per job) **without changing any result**. These would change results and are **not** done: turning off deterministic algorithms, AMP/TF32, `torch.compile`, parallel trials within one study (that changes the TPE sample sequence), the pruner.
+- **`common/loader.py`** (new): `GraphTensors` stacks a split's `Data` list (from `build_graphs`, so the values are the same tensors) on the device. `TensorLoader` assembles each minibatch with a few indexing ops (node offsets as in `Batch.from_data_list`), with no PyG Python collation per batch and no host→device copy. The shuffle order comes from a torch `DataLoader(range(n), …, generator)`, so the sampler and generator draws match the PyG loader exactly. It needs equal edge counts per graph (always true for top-K).
+- New config key **`training.loader: tensor | pyg`** (default `tensor`). `run_sweep.stage_graphs` builds the tensors once per run/study; `run_optuna` shares them across all trials.
+- `common/train.py`: train and val losses are summed as a float64 device tensor (same IEEE ops/order as the old Python-float sum), with one host sync per epoch. The per-epoch val pass uses the new `eval_loss` (no CPU copies of predictions). `EarlyStopping` keeps its best state on the device.
+- `append_row` holds an `fcntl` lock, so several processes can append to the same results.csv / best_params.csv / failures.csv. **Parallel studies on one GPU** (exact, since studies are independent): `for k in 1.0 0.8 0.6; do python topk/run_optuna.py --config configs/topk_gat_optuna.yaml --keep $k --no-summary & done; wait; python topk/summarize.py --config configs/topk_gat_optuna.yaml`.
+- Verified: `tests/test_loader.py` (every batch field equal to the PyG `Batch` over 2 shuffled epochs, GCN/GATv2 × keep 0/0.5/1.0 × personal/shared; `fit()` with `pyg` vs `tensor` gives identical history, metrics and weights). A one-off script also showed `fit()` matches the **original HEAD** `train.py`/`utils.py` + PyG loader bit for bit (GCN/GATv2, keep 0/0.3/1.0).
+- Speed: on a laptop **CPU**, GATv2 epochs are dominated by the model itself (FC21, 4,200 train subjects: GATv2 14.8 → 14.2 s/epoch, GCN 1.31 → 1.27 s/epoch), so the loader gives little there. The gain is expected on the **GPU**, where the per-batch CPU collation was the bottleneck; to be measured with `tests/bench_training.py --device cuda`.

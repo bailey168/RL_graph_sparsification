@@ -34,12 +34,22 @@ def signed_gcn_norm(src, dst, w, num_nodes, self_loop_weight=1.0):
     return edge_index, edge_weight
 
 
-def build_graphs(edge_vals, top_idx, demo, y, eids, edge_list, num_nodes, self_loop_weight=1.0):
+GRAPH_FORMATS = ('gcn_norm', 'edge_attr')
+
+
+def build_graphs(edge_vals, top_idx, demo, y, eids, edge_list, num_nodes, self_loop_weight=1.0,
+                 graph_format='gcn_norm'):
     """Build one PyG Data object per subject from its kept edges.
 
     edge_vals: (N, E) signed values carried by edges; top_idx: (N, k) kept edge indices;
     demo: (N, D); y: (N,) scaled target; edge_list: (E, 2) node index pairs.
+
+    graph_format 'gcn_norm' (GCNNet): `edge_weight` from signed_gcn_norm, both directions plus self-loops.
+    graph_format 'edge_attr' (GATv2Net): `edge_attr` (2k, 1) holding the raw edge values, both directions,
+    no self-loops (GATv2Conv adds its own); self_loop_weight is ignored.
     """
+    if graph_format not in GRAPH_FORMATS:
+        raise ValueError(f"Unknown graph_format '{graph_format}' (expected one of {GRAPH_FORMATS})")
     x_node = torch.arange(num_nodes, dtype=torch.long)
     demo_t = torch.from_numpy(demo).float().unsqueeze(1)   # (N, 1, D)
     y_t = torch.from_numpy(y).float().unsqueeze(1)          # (N, 1)
@@ -48,14 +58,17 @@ def build_graphs(edge_vals, top_idx, demo, y, eids, edge_list, num_nodes, self_l
     data_list = []
     for i in range(len(eids)):
         idx = top_idx[i]
-        edge_index, edge_weight = signed_gcn_norm(
-            src_global[idx], dst_global[idx], edge_vals[i, idx].astype(np.float64),
-            num_nodes, self_loop_weight
-        )
+        src, dst, w = src_global[idx], dst_global[idx], edge_vals[i, idx].astype(np.float64)
+        if graph_format == 'gcn_norm':
+            edge_index, edge_weight = signed_gcn_norm(src, dst, w, num_nodes, self_loop_weight)
+            edge_feats = {'edge_weight': torch.from_numpy(edge_weight).float()}
+        else:
+            edge_index = np.stack([np.concatenate([src, dst]), np.concatenate([dst, src])])
+            edge_feats = {'edge_attr': torch.from_numpy(np.concatenate([w, w])).float().view(-1, 1)}
         data_list.append(Data(
             x=x_node,
-            edge_index=torch.from_numpy(edge_index).long(),
-            edge_weight=torch.from_numpy(edge_weight).float(),
+            edge_index=torch.from_numpy(edge_index).long().view(2, -1),
+            **edge_feats,
             demographics=demo_t[i],
             y=y_t[i],
             eid=torch.tensor([int(eids[i])], dtype=torch.long),

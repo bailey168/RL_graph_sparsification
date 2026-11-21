@@ -7,7 +7,8 @@ from torch_geometric.loader import DataLoader
 
 from common.data import parse_region_map
 from common.graphs import build_graphs, dense_gcn_adj, signed_gcn_norm
-from common.models import GCNNet
+from common.infer import predict_dense
+from common.models import GATv2Net, GCNNet, build_model, graph_format
 from topk.sparsify import topk_edge_indices
 
 REGION_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'region_names')
@@ -165,3 +166,96 @@ def test_edge_dropout(fc21):
         with_p = model.forward_dense(adj, torch.zeros(4, 5))
         model.edge_dropout = 0.0
         torch.testing.assert_close(with_p, model.forward_dense(adj, torch.zeros(4, 5)))
+
+
+# ---------------------------------------------------------------------------------------------------------
+# GATv2 (edge_attr graphs)
+# ---------------------------------------------------------------------------------------------------------
+
+def _attr_graphs(fc21, keep_frac, demo_dim=5):
+    edge_list, X = fc21
+    top_idx = topk_edge_indices(np.abs(X), keep_frac)
+    demo = np.random.default_rng(1).normal(size=(len(X), demo_dim)).astype(np.float32)
+    graphs = build_graphs(X, top_idx, demo, np.zeros(len(X), np.float32), np.arange(len(X)), edge_list, 21,
+                          graph_format='edge_attr')
+    return graphs, top_idx
+
+
+@pytest.mark.parametrize('keep_frac', [0.0, 0.1, 1.0])
+def test_edge_attr_graph_structure(fc21, keep_frac):
+    edge_list, X = fc21
+    graphs, top_idx = _attr_graphs(fc21, keep_frac)
+    k = top_idx.shape[1]
+    for i, g in enumerate(graphs):
+        assert 'edge_weight' not in g
+        assert g.edge_index.shape == (2, 2 * k)
+        assert g.edge_attr.shape == (2 * k, 1)
+        assert (g.edge_index[0] != g.edge_index[1]).all()   # no self-loops (GATv2Conv adds them)
+        # values are the raw kept edge values, symmetric in both directions
+        np.testing.assert_allclose(g.edge_attr[:k, 0].numpy(), X[i, top_idx[i]], rtol=1e-6)
+        fwd = {(u, v): w for u, v, w in zip(*g.edge_index.tolist(), g.edge_attr.view(-1).tolist())}
+        for (u, v), w in fwd.items():
+            assert fwd[(v, u)] == pytest.approx(w)
+
+
+def test_unknown_graph_format(fc21):
+    edge_list, X = fc21
+    with pytest.raises(ValueError):
+        build_graphs(X, topk_edge_indices(np.abs(X), 0.5), np.zeros((len(X), 1), np.float32),
+                     np.zeros(len(X), np.float32), np.arange(len(X)), edge_list, 21, graph_format='dense')
+
+
+def _small_gat(pooling='attention', include_demo=True, edge_dropout=0.0, layers=3):
+    torch.manual_seed(0)
+    return GATv2Net(num_nodes=21, embedding_dim=8, hidden_channels=16, gnn_num_layers=layers,
+                    classifier_hidden_dims=[8], node_dropout=0.1, classifier_dropout=0.1, heads=2,
+                    pooling=pooling, include_demo=include_demo, demo_dim=5, demo_embed_dim=4,
+                    edge_dropout=edge_dropout)
+
+
+@pytest.mark.parametrize('pooling,include_demo,keep_frac', [('attention', True, 0.3), ('mean', False, 1.0),
+                                                            ('attention', True, 0.0), ('attention', False, 0.05)])
+def test_gat_forward(fc21, pooling, include_demo, keep_frac):
+    graphs, _ = _attr_graphs(fc21, keep_frac)
+    batch = next(iter(DataLoader(graphs, batch_size=len(graphs))))
+    model = _small_gat(pooling, include_demo)
+    for train in (True, False):   # train mode exercises BatchNorm batch stats and attention dropout
+        model.train(train)
+        out = model(batch)
+        assert out.shape == (len(graphs),)
+        assert torch.isfinite(out).all()
+    out.sum().backward()   # gradients reach the attention edge projection when there are edges
+    if keep_frac > 0:
+        assert model.conv_layers[0].lin_edge.weight.grad is not None
+
+
+def test_gat_uses_edge_values(fc21):
+    graphs, _ = _attr_graphs(fc21, 0.5)
+    batch = next(iter(DataLoader(graphs, batch_size=len(graphs))))
+    model = _small_gat().eval()
+    with torch.no_grad():
+        out = model(batch)
+        batch.edge_attr = batch.edge_attr * -3.0
+        assert not torch.allclose(out, model(batch))
+
+
+def test_gat_attention_dropout_eval_noop(fc21):
+    graphs, _ = _attr_graphs(fc21, 0.5)
+    batch = next(iter(DataLoader(graphs, batch_size=len(graphs))))
+    off, on = _small_gat(edge_dropout=0.0).eval(), _small_gat(edge_dropout=0.5).eval()
+    assert on.conv_layers[0].dropout == 0.5
+    with torch.no_grad():
+        torch.testing.assert_close(off(batch), on(batch))
+
+
+def test_build_model_dispatch():
+    cfg = dict(embedding_dim=8, hidden_channels=16, gnn_num_layers=2, classifier_hidden_dims=[8], node_dropout=0.1,
+               classifier_dropout=0.1, pooling='attention', include_demo=True, demo_embed_dim=4, heads=4)
+    assert isinstance(build_model(cfg, 21, 5), GCNNet) and graph_format(cfg) == 'gcn_norm'   # default type: gcn
+    gat = build_model({**cfg, 'type': 'gatv2'}, 21, 5)
+    assert isinstance(gat, GATv2Net) and graph_format({'type': 'gatv2'}) == 'edge_attr'
+    assert gat.conv_layers[0].heads == 4
+    with pytest.raises(ValueError):
+        build_model({**cfg, 'type': 'gin'}, 21, 5)
+    with pytest.raises(NotImplementedError):
+        predict_dense(gat, torch.zeros(2, 210), torch.zeros(210, 2, dtype=torch.long), 21)

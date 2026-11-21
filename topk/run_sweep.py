@@ -1,4 +1,5 @@
-"""Train/evaluate a fixed GCN on top-K sparsified FC graphs across FC types, tests, keep levels and seeds.
+"""Train/evaluate a fixed GNN (model.type: gcn | gatv2) on top-K sparsified FC graphs across FC types, tests,
+keep levels and seeds.
 
 Each keep level is run with a personal mask (every subject keeps their own top-K) and/or a shared
 mask (one top-K edge set derived from the training group, applied to everyone). The shared mask is
@@ -12,6 +13,7 @@ Example:
     python topk/run_sweep.py --fc FC21 --tests GF --keep 0.1 1.0 --max-subjects 2000 --max-epochs 3
 """
 import argparse
+import fcntl
 import gc
 import json
 import os
@@ -34,7 +36,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from common.config import load_config, snapshot
 from common.data import SPLITS, extract_arrays, load_subject_table, make_split, prepare_splits, save_split
 from common.graphs import build_graphs
-from common.models import build_model
+from common.loader import GraphTensors, TensorLoader
+from common.models import build_model, graph_format
 from common.train import fit
 from common.utils import set_deterministic_training
 from topk.sparsify import (edge_retention, is_redundant, num_kept_edges, shared_edge_indices, tile_mask,
@@ -43,7 +46,7 @@ from topk.summarize import auto_summarize
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Top-K FC sparsification sweep with a fixed GCN")
+    parser = argparse.ArgumentParser(description="Top-K FC sparsification sweep with a fixed GNN")
     parser.add_argument('--config', default='configs/topk.yaml')
     parser.add_argument('--fc', nargs='+', help='FC types (default: all in config)')
     parser.add_argument('--tests', nargs='+', help='Cognitive tests (default: all in config)')
@@ -76,18 +79,40 @@ def select_edges(prepared, keep_frac, mask):
     return {name: tile_mask(shared, len(prepared[name]['eids'])) for name in SPLITS}, shared
 
 
-def build_split_graphs(prepared, top_idx, edge_list, num_nodes, self_loop_weight):
+def build_split_graphs(prepared, top_idx, edge_list, num_nodes, self_loop_weight, graph_format='gcn_norm'):
     return {name: build_graphs(prepared[name]['edge_vals'], top_idx[name], prepared[name]['demo'],
-                               prepared[name]['y'], prepared[name]['eids'], edge_list, num_nodes, self_loop_weight)
+                               prepared[name]['y'], prepared[name]['eids'], edge_list, num_nodes, self_loop_weight,
+                               graph_format=graph_format)
             for name in SPLITS}
 
 
-def make_loaders(graphs, batch_size, num_workers, generator):
-    return {
-        name: DataLoader(graphs[name], batch_size=batch_size, shuffle=(name == 'train'),
-                         num_workers=num_workers, generator=generator if name == 'train' else None)
-        for name in SPLITS
-    }
+def loader_kind(train_cfg):
+    kind = train_cfg.get('loader', 'tensor')
+    if kind not in ('tensor', 'pyg'):
+        raise ValueError(f"Unknown training.loader '{kind}' (expected tensor | pyg)")
+    return kind
+
+
+def stage_graphs(graphs, train_cfg, device):
+    """Per-split data for make_loaders: GraphTensors on `device` (training.loader=tensor, the default) or the
+    Data lists themselves (pyg). Build once and reuse across runs/trials on the same graphs."""
+    if loader_kind(train_cfg) == 'pyg':
+        return graphs
+    return {name: GraphTensors(graphs[name], device) for name in SPLITS}
+
+
+def make_loaders(staged, batch_size, num_workers, generator):
+    """Train (shuffled with `generator`), val and test loaders. Both loader kinds give identical batches in
+    the same order; the tensor loader assembles them on the device without PyG collation (num_workers unused)."""
+    loaders = {}
+    for name in SPLITS:
+        shuffle, gen = name == 'train', generator if name == 'train' else None
+        if isinstance(staged[name], GraphTensors):
+            loaders[name] = TensorLoader(staged[name], batch_size, shuffle=shuffle, generator=gen)
+        else:
+            loaders[name] = DataLoader(staged[name], batch_size=batch_size, shuffle=shuffle,
+                                       num_workers=num_workers, generator=gen)
+    return loaders
 
 
 def prepare_fc(df, test, fc_type, split_idx, split_seed, cfg, output_dir):
@@ -129,7 +154,14 @@ def write_json(path, obj):
 
 
 def append_row(path, row):
-    pd.DataFrame([row]).to_csv(path, mode='a', header=not os.path.exists(path), index=False)
+    """Append one row; the file lock lets several processes (e.g. parallel studies) share one CSV."""
+    with open(path, 'a', newline='') as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            pd.DataFrame([row]).to_csv(f, header=f.tell() == 0, index=False)
+            f.flush()
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
 
 
 def free_memory():
@@ -145,10 +177,12 @@ def run_one(cfg, fc_type, test, mask, keep_frac, seed, prepared, preprocessors, 
     num_edges = len(arrays['edge_list'])
 
     top_idx, shared = select_edges(prepared, keep_frac, mask)
-    graphs = build_split_graphs(prepared, top_idx, arrays['edge_list'], num_nodes, cfg['graph']['self_loop_weight'])
+    graphs = build_split_graphs(prepared, top_idx, arrays['edge_list'], num_nodes, cfg['graph']['self_loop_weight'],
+                                graph_format(cfg['model']))
 
+    staged = stage_graphs(graphs, train_cfg, device)
     generator = set_deterministic_training(seed)
-    loaders = make_loaders(graphs, train_cfg['batch_size'], train_cfg['num_workers'], generator)
+    loaders = make_loaders(staged, train_cfg['batch_size'], train_cfg['num_workers'], generator)
     model = build_model(cfg['model'], num_nodes, demo_dim=prepared['train']['demo'].shape[1])
 
     result = fit(model, loaders, train_cfg, device, preprocessors['y'])

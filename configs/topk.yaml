@@ -1,4 +1,4 @@
-# Top-K FC graph sparsification baseline with a fixed GCN.
+# Top-K FC graph sparsification baseline with a fixed GNN (GCN by default, see model.type).
 # Any key can be overridden from the CLI, e.g. --set training.lr=0.001
 
 paths:
@@ -47,6 +47,8 @@ sweep:
   masks: [personal, shared]
 
 model:
+  type: gcn               # gcn | gatv2 (GATv2 uses edge_attr graphs; graph.self_loop_weight is then unused)
+  heads: 4                # GATv2 attention heads (averaged, concat=False); ignored by gcn
   embedding_dim: 16
   hidden_channels: 64
   gnn_num_layers: 3
@@ -67,4 +69,5 @@ training:
   early_stop_patience: 15
   early_stop_min_delta: 0.0
   compile: false
-  num_workers: 0
+  num_workers: 0           # pyg loader only
+  loader: tensor          # tensor: batches assembled on the device (fast) | pyg: PyG DataLoader; identical results

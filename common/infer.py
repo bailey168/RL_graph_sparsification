@@ -12,6 +12,8 @@ def predict_dense(model, edge_vals, edge_list, num_nodes, demographics=None, mas
     edge_vals: (B, E); mask: optional (B, E); demographics: (B, D) or None.
     batch_size=None runs everything in one pass; set it only if B×N×N doesn't fit.
     """
+    if not hasattr(model, 'forward_dense'):
+        raise NotImplementedError(f"{type(model).__name__} has no forward_dense; predict_dense supports GCNNet only")
     model.eval()
     B = edge_vals.shape[0]
     step = B if batch_size is None else batch_size

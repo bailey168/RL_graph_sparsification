@@ -30,7 +30,7 @@ def calc_r2_corr(y_true, y_pred):
 class EarlyStopping:
     """Stops training when the monitored loss hasn't improved for `patience` epochs.
 
-    Keeps a CPU copy of the best state_dict so it can be restored after training.
+    Keeps an on-device copy of the best state_dict so it can be restored after training.
     """
 
     def __init__(self, patience=15, min_delta=0.0):
@@ -46,7 +46,7 @@ class EarlyStopping:
         if loss < self.best_loss - self.min_delta:
             self.best_loss = loss
             self.best_epoch = epoch
-            self.best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            self.best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
             self.counter = 0
             return False
         self.counter += 1
