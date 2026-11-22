@@ -21,14 +21,15 @@ def test_base_config_inheritance(tmp_path):
     cfg = load_config(tmp_path / 'child.yaml', ['a.x=10'])
     assert cfg == {'a': {'x': 10, 'y': 20}, 'b': 3, 'c': 4}
 
-    # The real optuna config inherits topk.yaml and only changes the output dir
+    # The real optuna config inherits topk.yaml; it overrides the output dir and the sweep scope.
+    # Sweep scope (keep_fracs, masks) is a tunable default, so only check it is valid, not its exact value.
     cfg = load_optuna_cfg()
     base = load_config(os.path.join(ROOT, 'configs', 'topk.yaml'))
     assert cfg['model'] == base['model'] and cfg['training'] == base['training']
-    assert cfg['sweep']['keep_fracs'] == base['sweep']['keep_fracs']                # merged, not replaced
+    assert cfg['sweep']['keep_fracs'] and set(cfg['sweep']['keep_fracs']) <= set(base['sweep']['keep_fracs'])
     assert cfg['paths']['output_dir'] != base['paths']['output_dir']
     assert cfg['sweep']['fc'] == ['FC55'] and cfg['sweep']['tests'] == ['GF', 'DSST']
-    assert cfg['sweep']['masks'] == ['personal', 'shared']
+    assert cfg['sweep']['masks'] and set(cfg['sweep']['masks']) <= {'personal', 'shared'}
     assert base['model']['edge_dropout'] == 0.0
     assert 'base' not in cfg
 

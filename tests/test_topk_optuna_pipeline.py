@@ -34,7 +34,7 @@ def load_study(study_dir):
 
 def test_optuna_sweep_end_to_end(tmp_path):
     make_fake_csv(tmp_path / 'data')
-    proc = run_optuna(tmp_path)
+    proc = run_optuna(tmp_path, '--masks', 'personal', 'shared')   # explicit: config default is personal only
     assert proc.returncode == 0, proc.stdout + proc.stderr
     out = tmp_path / 'out'
     assert not (out / 'failures.csv').exists(), (out / 'failures.csv').read_text()

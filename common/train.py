@@ -112,7 +112,7 @@ def fit(model, loaders, train_cfg, device, y_preprocessor, epoch_callback=None):
 
             train_losses.append(train_loss)
             val_losses.append(val_loss)
-            pbar.set_postfix(train=f"{train_loss:.4f}", val=f"{val_loss:.4f}", es=early_stopping.counter)
+            pbar.set_postfix(train=f"{train_loss:.4f}", val=f"{val_loss:.4f}", es=early_stopping.counter, refresh=False)
 
             if epoch_callback is not None:
                 epoch_callback(epoch, train_loss, val_loss)

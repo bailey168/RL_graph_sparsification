@@ -150,6 +150,7 @@ The CLI can override any key (e.g. `--set training.lr=0.001`).
 - [ ] GATv2 Optuna: cluster smoke test, then GF keep 1.0 (compare with the GCN study), then the full 40 studies
 - [x] Faster training with identical results (2026-11-21, see below): device-resident tensor loader, cheaper epoch loop, file-locked CSV appends for parallel studies
 - [ ] Speed check on a cluster GPU: `python tests/bench_training.py --device cuda`, then a 3-trial smoke study with `--set training.loader=pyg` vs the default, diffing trials.csv/metrics.json
+- [x] Optuna default scope narrowed in `configs/topk_optuna.yaml` (keep_fracs 1.0/0.8/…/0.0, masks [personal]; 2026-11-21). Two stale tests fixed: `test_tuning.py` now only checks the sweep scope is valid, and the end-to-end Optuna test passes `--masks personal shared` explicitly so the shared path stays covered.
 
 ## Usage
 ```bash
@@ -293,3 +294,63 @@ Goal: speed up the Optuna GATv2 runs (one GPU per job) **without changing any re
 - `append_row` holds an `fcntl` lock, so several processes can append to the same results.csv / best_params.csv / failures.csv. **Parallel studies on one GPU** (exact, since studies are independent): `for k in 1.0 0.8 0.6; do python topk/run_optuna.py --config configs/topk_gat_optuna.yaml --keep $k --no-summary & done; wait; python topk/summarize.py --config configs/topk_gat_optuna.yaml`.
 - Verified: `tests/test_loader.py` (every batch field equal to the PyG `Batch` over 2 shuffled epochs, GCN/GATv2 × keep 0/0.5/1.0 × personal/shared; `fit()` with `pyg` vs `tensor` gives identical history, metrics and weights). A one-off script also showed `fit()` matches the **original HEAD** `train.py`/`utils.py` + PyG loader bit for bit (GCN/GATv2, keep 0/0.3/1.0).
 - Speed: on a laptop **CPU**, GATv2 epochs are dominated by the model itself (FC21, 4,200 train subjects: GATv2 14.8 → 14.2 s/epoch, GCN 1.31 → 1.27 s/epoch), so the loader gives little there. The gain is expected on the **GPU**, where the per-batch CPU collation was the bottleneck; to be measured with `tests/bench_training.py --device cuda`.
+
+---
+
+# RL stage (PPO): personalised edge pruning (planned 2026-11-21)
+Why: the proposal's main method. An RL agent prunes each subject's FC graph so that a GNN predicts cognition better. **PPO replaces the proposal's discrete SAC (user decision).** All decisions below were agreed with the user in a design session. The code is a new `rl/` package beside `topk/` that reuses `common/`. No new top-K models are trained; the existing `topk_gat_optuna` results are the comparison.
+
+| Topic | Decision |
+|---|---|
+| Episode | Iterative pruning. Each step removes 5% of the *original* edge count; max 20 removal steps (100% → 0%). Kept counts `k_t = max(1, floor((20−t)·E/20))` (0 at t=20) are computed in integer arithmetic. FC55 removes 74 or 75 edges per step. |
+| Stopping | Learned **STOP** action, so the amount of sparsity is personalised. Episodes end on STOP or at 0 edges. STOP is allowed at step 0. |
+| Reward | Prediction performance only, no sparsity term. `r_t = e_t − e_{t+1}` per removal (e = squared error of the frozen predictor on the scaled target); STOP gives 0. Return = `e_0 − e_stop`, which is relative to the subject's own full-graph error and cancels subject difficulty. (Comparing with the previous step's error would telescope to a policy-independent constant under prune-to-0; with STOP it does not.) |
+| Reward predictor | GATv2 (`GATv2Net`, unchanged), frozen during RL, trained with **mask augmentation**: per graph, a keep level drawn uniformly from {0, 5, …, 100}% and that many edges kept uniformly at random. Optuna uses the same setup as `topk_gat_optuna` (search space, trials, seed 0, TPE). The objective is val MSE on fixed, level-stratified random masks. |
+| Data split | Seed-0 70/15/15 split (the same as top-K Optuna). Train is split **50/50: half A trains the predictor, half B trains the agent**. Preprocessors are fit on the full train split. |
+| State | Current pruned graph (z-scored edge values), step t, and demographics. Demographics are projected and concatenated onto every node's input and again at readout. |
+| Policy | Actor: GATv2 trunk → per-edge removal logit from a symmetric MLP `[h_i+h_j, h_i⊙h_j, w_ij]`; STOP logit from pooled graph ⊕ demographics ⊕ t. Critic: separate GATv2 trunk → V(s). The m edges to remove are sampled without replacement (Plackett–Luce, Gumbel-top-m). Greedy action = STOP if p ≥ 0.5, else remove the top-m. |
+| PPO | Critic + GAE (**γ = 0.9**, λ = 0.95), clip 0.2, standard defaults, checked by hand (no Optuna over PPO). Checkpoint = best greedy val MSE on stopped graphs under the frozen predictor. (γ was first 1; changed 2026-11-21, see below.) |
+| Final GNN | Fresh GATv2 trained on **agent-stopped graphs** (one per subject, at its own STOP point) of all train subjects, same Optuna setup as top-K. Test is reported once. |
+| Scope | FC55 × {GF, DSST} |
+
+Stages / CLIs (outputs in `{output_dir}/{FC}/{TEST}/{predictor,agent,final}/`, output_dir `/scratch/bng/cartbind/data/RL_outputs/rl_ppo`):
+1. `rl/predictor.py`: Optuna mask-augmented GATv2 on half A
+2. `rl/train_agent.py`: PPO on half B
+3. `rl/final_gnn.py`: greedy masks for every subject → Optuna final GATv2
+4. `rl/summarize.py`: RL vs top-K plot, keep-fraction histogram, edge/network retention
+
+Risks: the agent may learn to STOP at once (a valid finding, but no sparse graphs). The agent may exploit predictor quirks (mitigated by the A/B split, random-mask training and the retrained final GNN). Per-subject signal is weak.
+
+## RL status
+- [x] `rl/` package + `configs/rl.yaml` + tests (2026-11-21). 70 fast tests pass, plus the slow toy test (`pytest -m slow`). The 2 failures that remain were there before: `test_tuning.py::test_base_config_inheritance` and `test_topk_optuna_pipeline.py::test_optuna_sweep_end_to_end` still expect the old `configs/topk_optuna.yaml` scope (`keep_fracs`, `masks: [personal, shared]`) from before commit 303c8cf.
+- [ ] Cluster smoke test (`--max-subjects 2000`), checking GPU memory and time per iteration
+- [ ] FC55 × GF, then DSST
+
+## Change (2026-11-21): γ = 0.9 instead of 1 (user decision)
+- A **planted toy problem** (`tests/test_rl_env.py::test_agent_learns_planted_toy_problem`, marked `slow`): y = sum of 5 "signal" edges out of 21, and the frozen predictor sums all kept edges, so noise edges hurt. The optimal agent removes the noise and stops.
+- With **γ = 1 the agent stalls**. Once it prunes every episode to 0 edges, the return `e_0 − e_stop` = (full-graph error − empty-graph error) no longer depends on the removal order, so the order gets zero gradient, and stopping never pays because the order is random. It ended up keeping nothing (val MSE 5.1 vs 16.3 full; optimum ≈ 0).
+- With **γ < 1** the order gets signal even in episodes that run to the end (removing a useful edge now costs more than later). With γ = 0.8, after 50 iterations it kept 88% of the signal edges and 16% of the noise (MSE 2.5). γ = 0.9 was improving more slowly (52% signal kept).
+- The return becomes `e_0 − (1−γ)·Σ_{t=1}^{T−1} γ^{t−1} e_t − γ^{T−1} e_T`, a weighted average of the errors along the pruning path, with the most weight on the stopped graph. The reward is still prediction performance only.
+
+## Implementation notes (2026-11-21)
+- Files:
+  - `rl/masking.py`: schedule, random/stratified masks, `masked_batch` (GPU `nonzero`, ragged edge counts), `MaskedLoader`, which is a drop-in for `common/train.fit`
+  - `rl/setup.py`: split, A/B halves, preprocessing, `RLData`; saves `splits/` and `preprocessors.pkl`
+  - `rl/study.py`: Optuna study over masked graphs, reusing `common/tuning` and `topk/run_optuna` checkpoint helpers; `predict_masked`; `load_trained_gnn`
+  - `rl/predictor.py`, `rl/env.py`, `rl/policy.py`, `rl/ppo.py`, `rl/train_agent.py`, `rl/final_gnn.py`, `rl/summarize.py`
+  - tests: `tests/test_rl_{masking,policy,env,pipeline}.py`
+- Defaults that differ from the plan, chosen for GPU memory (per-edge attention tensors scale as minibatch × 2,970 edges × heads × hidden): policy `hidden_channels: 32`, `heads: 2`; PPO `minibatch_size: 1024` (was 4096).
+- Removal log-prob: the ordered Plackett–Luce draw; the forced last step (removing every remaining edge) contributes 0. The entropy bonus is H(STOP) + H(one removal draw)/log(#kept).
+- `train_agent.py` resumes from `last.pt`, which holds the policy, optimizer, RNG states and early-stopping state, saved at every evaluation. `final_gnn.py` appends to `{output_dir}/results.csv` and runs the summary.
+- `pytest.ini`: `addopts = -m "not slow"`, so the toy learning check (~1 min) only runs with `pytest -m slow`.
+- `removal_schedule` needs E ≥ n_steps, otherwise some steps would remove no edges.
+
+## RL usage
+```bash
+python rl/predictor.py   --tests GF --max-subjects 2000 --n-trials 3 --max-epochs 5     # smoke, stage 1
+python rl/train_agent.py --tests GF --max-subjects 2000 --iterations 20                  # smoke, stage 2
+python rl/final_gnn.py   --tests GF --max-subjects 2000 --n-trials 3 --max-epochs 5     # smoke, stage 3 (+ summary)
+python rl/predictor.py --tests GF && python rl/train_agent.py --tests GF && python rl/final_gnn.py --tests GF   # full
+python rl/summarize.py                                                                    # re-summarize by hand
+pytest tests && pytest -m slow                                                            # unit/pipeline + toy learning check
+```

@@ -13,7 +13,7 @@ sweep:
   keep_fracs: [1.0, 0.8, 0.6, 0.4, 0.2, 0.0]
   # personal: each subject keeps its own top-K by |raw FC|
   # shared: one edge set for everyone (edges most often in train subjects' personal top-K)
-  # shared is skipped at keep 0.0 and 1.0 (same graphs as personal) -> 11 + 9 = 20 studies per FC x test
+  # shared is skipped at keep 0.0 and 1.0 (same graphs as personal)
   masks: [personal]   # --masks overrides
 
 optuna:
@@ -32,7 +32,7 @@ optuna:
   # Dotted config keys -> spec. Fixed (not searched): model.pooling (attention), graph.self_loop_weight, training.batch_size,
   # training.warmup_epochs, training.max_epochs, early stopping, graph.edge_value.
   search_space:
-    model.hidden_channels:  {type: pow2, low: 4, high: 7}            # 16-256
+    model.hidden_channels:  {type: pow2, low: 4, high: 7}            # 16-128
     model.embedding_dim:    {type: pow2, low: 3, high: 6, at_most: model.hidden_channels}   # 8-min(64, hidden)
     model.gnn_num_layers:   {type: int, low: 1, high: 3}
     model.classifier_hidden_dims: {type: decreasing_pow2, min_layers: 1, max_layers: 3, low: 2, below: model.hidden_channels}   # first layer <= hidden/2

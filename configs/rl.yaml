@@ -1,0 +1,51 @@
+# PPO graph sparsification (rl/): an agent prunes each subject's FC graph 5% at a time and learns when to STOP.
+# Inherits data paths, demographics, split fractions, graph.edge_value, the GATv2 model, training settings and the
+# Optuna setup (search space, n_trials, seed, TPE) from topk_gat_optuna.yaml. The same Optuna setup tunes both the
+# frozen reward predictor (stage 1) and the final GNN trained on agent-stopped graphs (stage 3).
+#   python rl/predictor.py   -> {output_dir}/{FC}/{TEST}/predictor/
+#   python rl/train_agent.py -> .../agent/
+#   python rl/final_gnn.py   -> .../final/   (then rl/summarize.py -> {output_dir}/summary/)
+base: topk_gat_optuna.yaml
+
+paths:
+  output_dir: /scratch/bng/cartbind/data/RL_outputs/rl_ppo
+  topk_results: /scratch/bng/cartbind/data/RL_outputs/topk_gat_optuna/results.csv   # comparison curve (read only)
+
+sweep:
+  fc: [FC55]              # default scope for every rl/ CLI (--fc / --tests override)
+  tests: [GF, DSST]
+
+rl:
+  seed: 0                 # split (same seed-0 split as top-K Optuna), A/B halves, Optuna, PPO
+  agent_frac: 0.5         # fraction of train subjects in half B (agent); half A trains the reward predictor
+  n_steps: 20             # each removal step removes 1/n_steps of the ORIGINAL edges (5%)
+
+  policy:
+    embedding_dim: 16     # node-ID embedding
+    demo_embed_dim: 8     # projected demographics, concatenated onto every node and at readout
+    hidden_channels: 32
+    heads: 2              # GATv2 heads (averaged)
+    gnn_num_layers: 2
+    mlp_hidden: 64        # edge-scoring, STOP and value MLPs
+    init_stop_prob: 0.05  # initial per-step STOP probability (keeps early rollouts exploring deep sparsity)
+
+  ppo:
+    iterations: 1000          # max PPO iterations (rollout + update)
+    subjects_per_iter: 1024   # half-B subjects per rollout (each runs one episode)
+    epochs: 4
+    minibatch_size: 1024      # transitions per gradient step
+    lr: 3.0e-4
+    clip: 0.2
+    value_coef: 0.5
+    entropy_coef: 0.01        # on H(STOP) + H(one removal draw)/log(#kept edges)
+    max_grad_norm: 0.5
+    gamma: 0.9                # < 1 on purpose: with gamma = 1, once the agent prunes every episode to 0 edges the return
+                              # e0 - e_stop no longer depends on the removal order, so the order gets no gradient and
+                              # the agent stalls (shown on a planted toy problem, tests/test_rl_env.py). With gamma < 1
+                              # the return is a weighted average of the errors along the pruning path (most weight on
+                              # the stopped graph); the reward is still prediction performance only.
+    gae_lambda: 0.95
+    target_kl: 0.03           # stop the epoch loop early when approx KL exceeds this
+    eval_every: 10            # greedy val evaluation every N iterations (checkpoint = best val MSE)
+    patience: 20              # stop after this many evaluations without val improvement
+    eval_batch_size: 2048     # subjects per greedy-evaluation batch
