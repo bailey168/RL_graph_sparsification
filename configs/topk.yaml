@@ -40,12 +40,13 @@ graph:
   self_loop_weight: 1.0
 
 sweep:
-  keep_fracs: [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]   # 0.0 = self-loops only (demographics-only reference)
+  fc: [FC55]              # FC types to run (must be keys of fc_types); --fc overrides
+  keep_fracs: [1.0, 0.8, 0.6, 0.4, 0.2, 0.0]   # 0.0 = self-loops only (demographics-only reference)
   seeds: [0, 1, 2, 3, 4]
+  tests: [GF, DSST]
   # personal: each subject keeps its own top-K by |raw FC|
   # shared: one edge set for everyone - edges most often in train subjects' personal top-K
   # shared is skipped at keep 0.0 and 1.0 (same graphs as personal); summarize.py reuses the personal rows
-  tests: [GF, DSST]
   masks: [personal]
 
 model:

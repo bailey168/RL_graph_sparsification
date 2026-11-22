@@ -33,7 +33,7 @@ def run_sweep(tmp_path, *extra):
     cmd = [sys.executable, os.path.join(ROOT, 'topk', 'run_sweep.py'),
            '--config', os.path.join(ROOT, 'configs', 'topk.yaml'),
            '--tests', 'GF', '--keep', '0.0', '0.1', '1.0', '--seeds', '0', '1', '--max-epochs', '3',
-           '--masks', 'personal', 'shared',   # explicit: topk.yaml defaults to personal only
+           '--fc', 'FC21', 'FC55', '--masks', 'personal', 'shared',   # explicit: topk.yaml narrows both
            '--set', f'paths.data_dir={tmp_path / "data"}', f'paths.output_dir={tmp_path / "out"}',
            f'paths.region_dir={os.path.join(ROOT, "region_names")}', 'split.use_eid_file=false',
            'training.batch_size=64', *extra]
