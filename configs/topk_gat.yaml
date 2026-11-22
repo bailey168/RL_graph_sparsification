@@ -1,0 +1,35 @@
+# Fixed-architecture top-K sweep with the GATv2 model (topk/run_sweep.py --config configs/topk_gat.yaml).
+# Inherits paths, data, split, graph and the sweep scope from topk.yaml. The full model / training blocks are
+# listed here so that the GAT architecture is set in one place (starting values = the topk.yaml defaults).
+# GATv2 graphs carry the z-scored edge values as edge_attr (attention logits only); GATv2Conv adds its own
+# self-loops, so graph.self_loop_weight is unused.
+base: topk.yaml
+
+paths:
+  output_dir: /scratch/bng/cartbind/data/RL_outputs/topk_gat   # separate from the GCN results
+
+model:
+  type: gatv2
+  heads: 4                # attention heads (averaged, concat=False)
+  embedding_dim: 16
+  hidden_channels: 64
+  gnn_num_layers: 3
+  classifier_hidden_dims: [32, 16]
+  node_dropout: 0.3
+  edge_dropout: 0.3       # GATv2 attention dropout
+  classifier_dropout: 0.3
+  pooling: attention      # attention | mean
+  include_demo: true
+  demo_embed_dim: 8
+
+training:
+  batch_size: 512
+  max_epochs: 200
+  lr: 0.005
+  weight_decay: 0.01
+  warmup_epochs: 10
+  early_stop_patience: 15
+  early_stop_min_delta: 0.0
+  compile: false
+  num_workers: 0          # pyg loader only
+  loader: tensor          # tensor | pyg; identical results

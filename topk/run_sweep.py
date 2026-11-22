@@ -48,8 +48,8 @@ from topk.summarize import auto_summarize
 def parse_args():
     parser = argparse.ArgumentParser(description="Top-K FC sparsification sweep with a fixed GNN")
     parser.add_argument('--config', default='configs/topk.yaml')
-    parser.add_argument('--fc', nargs='+', help='FC types (default: all in config)')
-    parser.add_argument('--tests', nargs='+', help='Cognitive tests (default: all in config)')
+    parser.add_argument('--fc', nargs='+', help='FC types (default: sweep.fc, else all in config)')
+    parser.add_argument('--tests', nargs='+', help='Cognitive tests (default: sweep.tests, else all in config)')
     parser.add_argument('--keep', nargs='+', type=float, help='Keep fractions (default: sweep.keep_fracs)')
     parser.add_argument('--seeds', nargs='+', type=int, help='Training seeds (default: sweep.seeds)')
     parser.add_argument('--masks', nargs='+', choices=['personal', 'shared'],
@@ -207,8 +207,8 @@ def main():
     if args.max_epochs is not None:
         cfg['training']['max_epochs'] = args.max_epochs
 
-    fc_types = args.fc or list(cfg['fc_types'])
-    tests = args.tests or list(cfg['tests'])
+    fc_types = args.fc or cfg['sweep'].get('fc') or list(cfg['fc_types'])
+    tests = args.tests or cfg['sweep'].get('tests') or list(cfg['tests'])
     keep_fracs = args.keep or cfg['sweep']['keep_fracs']
     seeds = args.seeds or cfg['sweep']['seeds']
     masks = args.masks or cfg['sweep']['masks']

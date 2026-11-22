@@ -1,4 +1,5 @@
-# Top-K sweep with per-sparsity-level Optuna hyperparameter search (topk/run_optuna.py).
+# Shared Optuna base: top-K sweep with per-sparsity-level Optuna hyperparameter search (topk/run_optuna.py).
+# Run directly, it tunes the GCN (model.type from topk.yaml); configs/topk_gat_optuna.yaml is the GATv2 variant.
 # Inherits everything from topk.yaml; only the keys below change. sweep.seeds is not used here:
 # every study uses optuna.seed for the split, the training seed and the TPE sampler.
 base: topk.yaml

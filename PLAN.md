@@ -147,6 +147,8 @@ The CLI can override any key (e.g. `--set training.lr=0.001`).
 - [x] Optuna scope narrowed to FC55 × {GF, DSST}, pooling fixed, edge dropout added, auto-summary (2026-11-19), 29 tests pass
 - [ ] Optuna cluster smoke test, then the full 40-study run (summary is written automatically)
 - [x] GATv2 model option + `configs/topk_gat_optuna.yaml` (2026-11-21, see below), 43 tests pass
+- [x] `configs/topk_gat.yaml` (2026-11-22): fixed-architecture GATv2 sweep for `run_sweep.py` (`base: topk.yaml`, only `model.type: gatv2` + own output dir; lists the full `model:` / `training:` blocks explicitly, starting from the topk.yaml values, so the GAT architecture is edited in one place). No renames: `topk.yaml` / `topk_optuna.yaml` header comments now say they are the shared bases (GCN when run directly).
+- [x] Fixed-sweep scope narrowed in `configs/topk.yaml` (2026-11-22, user edit): `sweep.tests: [GF, DSST]`, `sweep.masks: [personal]`, `keep_fracs` 0.0/0.2/…/1.0, GCN `edge_dropout: 0.3` (topk_gat.yaml keeps its own 0.0). `run_sweep.py` now reads `sweep.fc` / `sweep.tests` like `run_optuna.py` (CLI still overrides). Tests: `test_topk_pipeline.py` passes `--masks personal shared` explicitly; `test_tuning.py` no longer asserts base `edge_dropout == 0.0`. Not run locally (no env); run `pytest` on the cluster.
 - [ ] GATv2 Optuna: cluster smoke test, then GF keep 1.0 (compare with the GCN study), then the full 40 studies
 - [x] Faster training with identical results (2026-11-21, see below): device-resident tensor loader, cheaper epoch loop, file-locked CSV appends for parallel studies
 - [ ] Speed check on a cluster GPU: `python tests/bench_training.py --device cuda`, then a 3-trial smoke study with `--set training.loader=pyg` vs the default, diffing trials.csv/metrics.json
@@ -168,7 +170,7 @@ python topk/summarize.py --config configs/topk_optuna.yaml     # re-summarize by
 # GATv2 instead of GCN: same scope and search space + heads, separate output dir (topk_gat_optuna)
 python topk/run_optuna.py --config configs/topk_gat_optuna.yaml --tests GF --keep 0.0 1.0 --max-subjects 2000 --n-trials 3 --max-epochs 5   # smoke
 python topk/run_optuna.py --config configs/topk_gat_optuna.yaml --tests GF --keep 1.0   # first real check vs GCN
-python topk/run_sweep.py --set model.type=gatv2 model.heads=4 paths.output_dir=...      # fixed-hyperparameter GAT sweep
+python topk/run_sweep.py --config configs/topk_gat.yaml        # fixed-architecture GAT sweep (output topk_gat)
 ```
 
 ## Review (2026-11-21): new top-K/Optuna code vs old GAT notebook, no code changes

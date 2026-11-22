@@ -30,7 +30,6 @@ def test_base_config_inheritance(tmp_path):
     assert cfg['paths']['output_dir'] != base['paths']['output_dir']
     assert cfg['sweep']['fc'] == ['FC55'] and cfg['sweep']['tests'] == ['GF', 'DSST']
     assert cfg['sweep']['masks'] and set(cfg['sweep']['masks']) <= {'personal', 'shared'}
-    assert base['model']['edge_dropout'] == 0.0
     assert 'base' not in cfg
 
 
