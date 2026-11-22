@@ -11,7 +11,7 @@ paths:
 model:
   type: gatv2
   heads: 4                # attention heads (averaged, concat=False)
-  embedding_dim: 16
+  embedding_dim: 64
   hidden_channels: 64
   gnn_num_layers: 3
   classifier_hidden_dims: [32, 16]

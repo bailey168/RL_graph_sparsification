@@ -52,7 +52,7 @@ sweep:
 model:
   type: gcn               # gcn | gatv2 (GATv2 uses edge_attr graphs; graph.self_loop_weight is then unused)
   heads: 4                # GATv2 attention heads (averaged, concat=False); ignored by gcn
-  embedding_dim: 16
+  embedding_dim: 64
   hidden_channels: 64
   gnn_num_layers: 3
   classifier_hidden_dims: [32, 16]
