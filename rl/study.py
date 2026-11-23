@@ -1,7 +1,10 @@
-"""One Optuna study training a GATv2 on masked graphs, shared by the reward predictor and the final GNN.
+"""Training the GATv2 on masked graphs, shared by the reward predictor and the final GNN.
 
-Same machinery and outputs as topk/run_optuna.py (common/tuning.py search space, TPE, one SQLite file per study,
-best-trial checkpoint, study plots), but batches come from rl.masking.MaskedLoader: either a fresh random mask per
+rl.gnn_tuning picks the mode: 'fixed' (default) trains one model with cfg['model'] / cfg['training']; 'optuna' runs
+one Optuna study.
+
+The Optuna mode uses the same machinery and outputs as topk/run_optuna.py (common/tuning.py search space, TPE, one
+SQLite file per study, best-trial checkpoint, study plots). In both modes batches come from rl.masking.MaskedLoader: either a fresh random mask per
 subject per batch (mask augmentation, predictor) or fixed per-subject masks (agent-stopped graphs, final GNN).
 """
 import os
@@ -94,6 +97,47 @@ def run_masked_study(cfg, study_dir, label, data, sets, masks, device, n_trials)
         yaml.safe_dump(snapshot(best_cfg, label=label, best_trial=best.number), f, sort_keys=False)
     return {'saved': saved, 'best_trial': best.number, 'best_val_loss': best.value, 'states': states,
             'best_values': flatten_values(best_values), 'study_minutes': (time.time() - start) / 60.0}
+
+
+GNN_TUNING_MODES = ('fixed', 'optuna')
+
+
+def gnn_tuning_mode(cfg):
+    """rl.gnn_tuning: 'fixed' (one GATv2 with cfg['model'] / cfg['training'], the default) or 'optuna'."""
+    mode = cfg['rl'].get('gnn_tuning', 'fixed')
+    if mode not in GNN_TUNING_MODES:
+        raise ValueError(f"rl.gnn_tuning must be one of {GNN_TUNING_MODES}, got {mode!r}")
+    return mode
+
+
+def run_fixed_training(cfg, out_dir, label, data, sets, masks, device):
+    """Train one GNN with the fixed cfg['model'] / cfg['training'] (no Optuna) and write its outputs into out_dir.
+
+    Same files as the best trial of run_masked_study (model.pt, losses.csv, test_predictions.csv, best_trial.json,
+    config.yaml), minus the study files. Returns a dict with the same keys as run_masked_study.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    start = time.time()
+    loaders = make_masked_loaders(sets, masks, data, cfg['training']['batch_size'], cfg['rl']['seed'],
+                                  cfg['rl']['n_steps'])
+    model = build_model(cfg['model'], data.num_nodes, data.demo_dim)
+    result = fit(model, loaders, cfg['training'], device, data.preprocessors['y'])
+    write_best_artifacts(out_dir, None, model, result)
+    with open(os.path.join(out_dir, 'config.yaml'), 'w') as f:
+        yaml.safe_dump(snapshot(cfg, label=label, gnn_tuning='fixed'), f, sort_keys=False)
+    del model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return {'saved': read_best_trial(out_dir), 'best_trial': None, 'best_val_loss': result['best_val_loss'],
+            'states': {'complete': 1, 'pruned': 0, 'failed': 0}, 'best_values': {},
+            'study_minutes': (time.time() - start) / 60.0}
+
+
+def train_stage_gnn(cfg, out_dir, label, data, sets, masks, device, n_trials):
+    """The stage's GNN: one fixed-architecture run or an Optuna study, depending on rl.gnn_tuning."""
+    if gnn_tuning_mode(cfg) == 'fixed':
+        return run_fixed_training(cfg, out_dir, label, data, sets, masks, device)
+    return run_masked_study(cfg, out_dir, label, data, sets, masks, device, n_trials)
 
 
 @torch.no_grad()   # not inference_mode: the env updates these predictions in place

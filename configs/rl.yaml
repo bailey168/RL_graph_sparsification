@@ -1,7 +1,8 @@
 # PPO graph sparsification (rl/): an agent prunes each subject's FC graph 5% at a time and learns when to STOP.
-# Inherits data paths, demographics, split fractions, graph.edge_value, the GATv2 model, training settings and the
-# Optuna setup (search space, n_trials, seed, TPE) from topk_gat_optuna.yaml. The same Optuna setup tunes both the
-# frozen reward predictor (stage 1) and the final GNN trained on agent-stopped graphs (stage 3).
+# Inherits data paths, demographics, split fractions, graph.edge_value and the Optuna setup (search space, n_trials,
+# seed, TPE) from topk_gat_optuna.yaml. rl.gnn_tuning sets how the frozen reward predictor (stage 1) and the final GNN
+# trained on agent-stopped graphs (stage 3) are trained: 'fixed' (default) = one GATv2 with the model / training
+# blocks below (same values as configs/topk_gat.yaml); 'optuna' = an Optuna study per stage (--set rl.gnn_tuning=optuna).
 #   python rl/predictor.py   -> {output_dir}/{FC}/{TEST}/predictor/
 #   python rl/train_agent.py -> .../agent/
 #   python rl/final_gnn.py   -> .../final/   (then rl/summarize.py -> {output_dir}/summary/)
@@ -9,7 +10,38 @@ base: topk_gat_optuna.yaml
 
 paths:
   output_dir: /scratch/bng/cartbind/data/RL_outputs/rl_ppo
-  topk_results: /scratch/bng/cartbind/data/RL_outputs/topk_gat_optuna/results.csv   # comparison curve (read only)
+  topk_results:           # comparison curve (read only); rl/summarize.py uses the entry matching rl.gnn_tuning
+    fixed: /scratch/bng/cartbind/data/RL_outputs/topk_gat/results.csv
+    optuna: /scratch/bng/cartbind/data/RL_outputs/topk_gat_optuna/results.csv
+
+# Fixed GATv2 (rl.gnn_tuning: fixed), used for both the reward predictor and the final GNN. Same values as
+# configs/topk_gat.yaml, so the RL GNNs match the fixed top-K GATv2 baseline. With Optuna, the search space overrides
+# the searched keys.
+model:
+  type: gatv2
+  heads: 4                # attention heads (averaged, concat=False)
+  embedding_dim: 64
+  hidden_channels: 64
+  gnn_num_layers: 3
+  classifier_hidden_dims: [32, 16]
+  node_dropout: 0.3
+  edge_dropout: 0.3       # GATv2 attention dropout
+  classifier_dropout: 0.3
+  pooling: attention      # attention | mean
+  include_demo: true
+  demo_embed_dim: 8
+
+training:
+  batch_size: 512
+  max_epochs: 200
+  lr: 0.005
+  weight_decay: 0.01
+  warmup_epochs: 10
+  early_stop_patience: 15
+  early_stop_min_delta: 0.0
+  compile: false
+  num_workers: 0          # pyg loader only
+  loader: tensor          # tensor | pyg; identical results
 
 sweep:
   fc: [FC55]              # default scope for every rl/ CLI (--fc / --tests override)
@@ -19,6 +51,8 @@ rl:
   seed: 0                 # split (same seed-0 split as top-K Optuna), A/B halves, Optuna, PPO
   agent_frac: 0.5         # fraction of train subjects in half B (agent); half A trains the reward predictor
   n_steps: 20             # each removal step removes 1/n_steps of the ORIGINAL edges (5%)
+  gnn_tuning: fixed       # fixed | optuna: GATv2 for the reward predictor and the final GNN. fixed = one run with the
+                          # model / training blocks below (no Optuna); optuna = one study per stage (optuna: block)
 
   policy:
     embedding_dim: 16     # node-ID embedding

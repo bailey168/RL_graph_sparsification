@@ -1,17 +1,20 @@
-"""Stage 1: Optuna-tuned, mask-augmented GATv2 reward predictor (frozen during PPO).
+"""Stage 1: mask-augmented GATv2 reward predictor (frozen during PPO), fixed architecture or Optuna-tuned.
 
 Trained on half A of the train split. Every training batch draws, per subject, a keep level uniformly from the
 n_steps+1 schedule levels (0%, 5%, ..., 100%) and keeps that many edges chosen uniformly at random, so the predictor
 gives sensible predictions on any pruned graph the agent can produce. Val/test use fixed level-stratified random
-masks; the objective is val MSE (scaled target). Search space, trials, seed and sampler come from the inherited
-Optuna setup (topk_gat_optuna.yaml).
+masks; early stopping (and, with Optuna, the objective) uses val MSE (scaled target).
+rl.gnn_tuning: 'fixed' (default) trains one GATv2 with the model / training blocks of configs/rl.yaml; 'optuna' runs a
+study with the inherited Optuna setup (topk_gat_optuna.yaml: search space, trials, seed, sampler).
 
-Output in {output_dir}/{FC}/{TEST}/predictor/: study.db, trials.csv, best_params.json, config.yaml (best params),
-model.pt, losses.csv, test_predictions.csv, best_trial.json, plots/, r2_by_level.csv/.png (test R² per keep level on
-random masks), metrics.json (written last).
+Output in {output_dir}/{FC}/{TEST}/predictor/: config.yaml, model.pt, losses.csv, test_predictions.csv,
+best_trial.json, r2_by_level.csv/.png (test R² per keep level on random masks), timing.json (minutes per component,
+accumulated across resumes), metrics.json (written last; includes time_*_min).
+Optuna mode also writes study.db, trials.csv, best_params.json and plots/.
 
 Example:
-    python rl/predictor.py --tests GF --max-subjects 2000 --n-trials 3 --max-epochs 5
+    python rl/predictor.py --tests GF --max-subjects 2000 --max-epochs 5
+    python rl/predictor.py --tests GF --max-subjects 2000 --n-trials 3 --max-epochs 5 --set rl.gnn_tuning=optuna
 """
 import os
 import sys
@@ -31,10 +34,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rl.masking import level_masks, removal_schedule, stratified_masks
 from rl.setup import base_parser, get_device, load_cli_config, load_rl_data, stage_dir
-from rl.study import load_trained_gnn, original_scale_metrics, predict_masked, run_masked_study
+from rl.study import (gnn_tuning_mode, load_trained_gnn, original_scale_metrics, predict_masked,
+                      train_stage_gnn)
+from rl.timing import TIMING_FILE, StageTimer
 from topk.run_sweep import free_memory, write_json
 
-STUDY_FILES = ('study.db', 'metrics.json', 'best_trial.json')
+STUDY_FILES = ('study.db', 'metrics.json', 'best_trial.json', TIMING_FILE)
 
 
 def clear_stage(out_dir, files):
@@ -70,7 +75,7 @@ def plot_by_level(df, path, title):
     plt.close(fig)
 
 
-def run_predictor(cfg, fc_type, test, data, out_dir, device, n_trials):
+def run_predictor(cfg, fc_type, test, data, out_dir, device, n_trials, timer):
     seed, n_steps = cfg['rl']['seed'], cfg['rl']['n_steps']
     generator = torch.Generator().manual_seed(seed + 2)
     sets = {'train': data.sets['train_pred'], 'val': data.sets['val'], 'test': data.sets['test']}
@@ -78,12 +83,15 @@ def run_predictor(cfg, fc_type, test, data, out_dir, device, n_trials):
              'val': stratified_masks(len(sets['val']), data.num_edges, n_steps, generator),
              'test': stratified_masks(len(sets['test']), data.num_edges, n_steps, generator)}
     label = f"{fc_type}|{test}|predictor"
-    res = run_masked_study(cfg, out_dir, label, data, sets, masks, device, n_trials)
+    with timer.section('gnn_training'):
+        res = train_stage_gnn(cfg, out_dir, label, data, sets, masks, device, n_trials)
 
-    model = load_trained_gnn(out_dir, data.num_nodes, data.demo_dim, device)
-    by_level = r2_by_level(model, data.sets['test'], data, n_steps, data.preprocessors['y'], seed)
-    by_level.to_csv(os.path.join(out_dir, 'r2_by_level.csv'), index=False)
-    plot_by_level(by_level, os.path.join(out_dir, 'r2_by_level.png'), f"Reward predictor | {fc_type} {test}")
+    with timer.section('eval_by_level'):
+        model = load_trained_gnn(out_dir, data.num_nodes, data.demo_dim, device)
+        by_level = r2_by_level(model, data.sets['test'], data, n_steps, data.preprocessors['y'], seed)
+        by_level.to_csv(os.path.join(out_dir, 'r2_by_level.csv'), index=False)
+        plot_by_level(by_level, os.path.join(out_dir, 'r2_by_level.png'), f"Reward predictor | {fc_type} {test}")
+    timer.finish()
 
     saved = res['saved']
     row = {'fc': fc_type, 'test': test, 'stage': 'predictor', 'n_train': len(sets['train']),
@@ -93,14 +101,14 @@ def run_predictor(cfg, fc_type, test, data, out_dir, device, n_trials):
            'n_failed': res['states']['failed'], 'study_minutes': res['study_minutes'],
            **{k: saved[k] for k in saved if k.split('_')[0] in ('train', 'val', 'test')},
            'test_r2_full_graph': float(by_level['r2'].iloc[0]), 'test_r2_empty_graph': float(by_level['r2'].iloc[-1]),
-           **res['best_values']}
+           **res['best_values'], **timer.flat()}
     write_json(os.path.join(out_dir, 'metrics.json'), row)   # written last: marks the stage as complete
     return row
 
 
 def main():
-    parser = base_parser("Stage 1: Optuna-tuned mask-augmented GATv2 reward predictor")
-    parser.add_argument('--n-trials', type=int, help='Override optuna.n_trials')
+    parser = base_parser("Stage 1: mask-augmented GATv2 reward predictor")
+    parser.add_argument('--n-trials', type=int, help='Override optuna.n_trials (rl.gnn_tuning=optuna only)')
     parser.add_argument('--max-epochs', type=int, help='Override training.max_epochs')
     args = parser.parse_args()
     cfg, fc_types, tests = load_cli_config(args)
@@ -109,7 +117,12 @@ def main():
     n_trials = args.n_trials or cfg['optuna']['n_trials']
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     device = get_device()
-    print(f"Using device: {device} | {n_trials} trials")
+    if gnn_tuning_mode(cfg) == 'fixed':
+        if args.n_trials is not None:
+            print("Note: --n-trials is ignored with rl.gnn_tuning=fixed")
+        print(f"Using device: {device} | fixed GNN architecture (rl.gnn_tuning=fixed)")
+    else:
+        print(f"Using device: {device} | Optuna, {n_trials} trials")
 
     failed = False
     for test in tests:
@@ -122,10 +135,13 @@ def main():
                 continue
             print(f"\n=== {fc_type} | {test} | reward predictor ===")
             try:
-                data = load_rl_data(cfg, test, fc_type, device, args.max_subjects)
-                row = run_predictor(cfg, fc_type, test, data, out_dir, device, n_trials)
+                timer = StageTimer(out_dir, device)
+                with timer.section('load_data'):
+                    data = load_rl_data(cfg, test, fc_type, device, args.max_subjects)
+                row = run_predictor(cfg, fc_type, test, data, out_dir, device, n_trials, timer)
                 print(f"  best trial #{row['best_trial']}: val MSE={row['best_val_loss']:.4f} "
-                      f"test R² full={row['test_r2_full_graph']:.4f} empty={row['test_r2_empty_graph']:.4f}")
+                      f"test R² full={row['test_r2_full_graph']:.4f} empty={row['test_r2_empty_graph']:.4f} | "
+                      f"{row['time_total_min']:.1f} min")
             except Exception:
                 traceback.print_exc()
                 failed = True

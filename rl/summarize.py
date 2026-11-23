@@ -1,14 +1,17 @@
-"""Stage 4: summarize the RL runs and compare them with the existing top-K (GATv2 Optuna) results.
+"""Stage 4: summarize the RL runs and compare them with the existing top-K GATv2 results.
 
 For every {FC}/{TEST} with a finished final GNN, writes to {output_dir}/summary/:
   rl_results.csv                       one row per FC × test (final-GNN and frozen-predictor metrics, sparsity)
-  rl_vs_topk_{FC}_{TEST}.png           top-K test R² vs keep % (read from paths.topk_results, not retrained) with the
-                                       RL final GNN at its mean keep % (± SD across subjects)
+  rl_vs_topk_{FC}_{TEST}.png           top-K test R² vs keep % (read from paths.topk_results, not retrained; the entry
+                                       matching rl.gnn_tuning, mean over seeds) with the RL final GNN at its mean
+                                       keep % (± SD across subjects)
   keep_hist_{FC}_{TEST}.png            distribution of the agent's chosen keep % on test subjects
   r2_by_keep_{FC}_{TEST}.csv           final-GNN test metrics grouped by the subject's chosen keep level
   edge_retention_{FC}_{TEST}.png       fraction of test subjects keeping each edge, nodes ordered by network
   network_retention_{FC}_{TEST}.csv    mean retention within/between networks
   edge_ranking_{FC}_{TEST}.csv         edges by retention, with node/network names and mean removal step
+  timing.csv                           minutes per FC × test × stage × component (from each stage's timing.json),
+                                       a 'total' row per stage and a pipeline/total row (the whole run's compute time)
 
 Example:
     python rl/summarize.py --config configs/rl.yaml
@@ -31,6 +34,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from common.config import load_config
 from common.data import parse_region_map
 from rl.masking import removal_schedule
+from rl.setup import pipeline_stage_dirs
+from rl.study import gnn_tuning_mode
+from rl.timing import timing_rows
 
 
 def load_networks(cfg, fc_type, node_names):
@@ -51,9 +57,17 @@ def load_networks(cfg, fc_type, node_names):
     return [labels[n] for n in node_names], order
 
 
+def topk_results_path(cfg):
+    """paths.topk_results: a path, or {fixed: path, optuna: path} picked by rl.gnn_tuning. None if unset."""
+    value = cfg['paths'].get('topk_results')
+    if isinstance(value, dict):
+        return value.get(gnn_tuning_mode(cfg))
+    return value
+
+
 def plot_vs_topk(cfg, fc_type, test, row, out_path):
     fig, ax = plt.subplots(figsize=(7, 4.5))
-    topk_path = cfg['paths'].get('topk_results')
+    topk_path = topk_results_path(cfg)
     if topk_path and os.path.exists(topk_path):
         topk = pd.read_csv(topk_path)
         topk = topk[(topk['fc'] == fc_type) & (topk['test'] == test)]
@@ -161,11 +175,26 @@ def retention_outputs(cfg, fc_type, test, final_dir, out_dir):
     plt.close(fig)
 
 
+def write_timing(cfg, out_dir):
+    """summary/timing.csv for every FC × test with at least one timed stage (finished or not). Returns the frame."""
+    rows = [r for fc_type in cfg['fc_types'] for test in cfg['tests']
+            for r in timing_rows(pipeline_stage_dirs(cfg, fc_type, test), fc=fc_type, test=test)]
+    if not rows:
+        return None
+    df = pd.DataFrame(rows)
+    df.to_csv(os.path.join(out_dir, 'timing.csv'), index=False)
+    totals = df[df['component'] == 'total'].pivot_table(index=['fc', 'test'], columns='stage', values='minutes')
+    print("Minutes per stage (compute time, summed across resumed sessions):")
+    print(totals[[c for c in ('predictor', 'agent', 'final', 'pipeline') if c in totals]].round(1).to_string())
+    return df
+
+
 def summarize(cfg):
     output_dir = cfg['paths']['output_dir']
     out_dir = os.path.join(output_dir, 'summary')
     os.makedirs(out_dir, exist_ok=True)
     n_steps = cfg['rl']['n_steps']
+    write_timing(cfg, out_dir)
     rows = []
     for fc_type in cfg['fc_types']:
         for test in cfg['tests']:
@@ -191,7 +220,7 @@ def summarize(cfg):
     df = pd.DataFrame(rows)
     df.to_csv(os.path.join(out_dir, 'rl_results.csv'), index=False)
     cols = ['fc', 'test', 'test_r2', 'predictor_test_r2', 'predictor_test_r2_full', 'test_keep_frac_mean',
-            'test_keep_frac_sd']
+            'test_keep_frac_sd', 'pipeline_minutes_total']
     print(df[[c for c in cols if c in df]].to_string(index=False))
     print(f"Summary written to {out_dir}")
     return df

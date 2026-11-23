@@ -307,26 +307,46 @@ Why: the proposal's main method. An RL agent prunes each subject's FC graph so t
 | Episode | Iterative pruning. Each step removes 5% of the *original* edge count; max 20 removal steps (100% → 0%). Kept counts `k_t = max(1, floor((20−t)·E/20))` (0 at t=20) are computed in integer arithmetic. FC55 removes 74 or 75 edges per step. |
 | Stopping | Learned **STOP** action, so the amount of sparsity is personalised. Episodes end on STOP or at 0 edges. STOP is allowed at step 0. |
 | Reward | Prediction performance only, no sparsity term. `r_t = e_t − e_{t+1}` per removal (e = squared error of the frozen predictor on the scaled target); STOP gives 0. Return = `e_0 − e_stop`, which is relative to the subject's own full-graph error and cancels subject difficulty. (Comparing with the previous step's error would telescope to a policy-independent constant under prune-to-0; with STOP it does not.) |
-| Reward predictor | GATv2 (`GATv2Net`, unchanged), frozen during RL, trained with **mask augmentation**: per graph, a keep level drawn uniformly from {0, 5, …, 100}% and that many edges kept uniformly at random. Optuna uses the same setup as `topk_gat_optuna` (search space, trials, seed 0, TPE). The objective is val MSE on fixed, level-stratified random masks. |
+| Reward predictor | GATv2 (`GATv2Net`, unchanged), frozen during RL, trained with **mask augmentation**: per graph, a keep level drawn uniformly from {0, 5, …, 100}% and that many edges kept uniformly at random. **Default (2026-11-23): fixed architecture, no Optuna** (`rl.gnn_tuning: fixed`, the `configs/topk_gat.yaml` values). Optional `rl.gnn_tuning: optuna` uses the same setup as `topk_gat_optuna` (search space, trials, seed 0, TPE). Early stopping (and the Optuna objective) uses val MSE on fixed, level-stratified random masks. |
 | Data split | Seed-0 70/15/15 split (the same as top-K Optuna). Train is split **50/50: half A trains the predictor, half B trains the agent**. Preprocessors are fit on the full train split. |
 | State | Current pruned graph (z-scored edge values), step t, and demographics. Node input = node-ID embedding only. Demographics and t/n_steps are **not** node features (changed 2026-11-22, see below): each trunk builds a context `[projected demo, t/n_steps]` used only at the heads. |
 | Policy | Actor: GATv2 trunk → per-edge removal logit from a symmetric MLP `[h_i+h_j, h_i⊙h_j, w_ij, demo, t]`; STOP logit from pooled graph ⊕ demographics ⊕ t. Critic: separate GATv2 trunk → V(s). The m edges to remove are sampled without replacement (Plackett–Luce, Gumbel-top-m). Greedy action = STOP if p ≥ 0.5, else remove the top-m. |
 | PPO | Critic + GAE (**γ = 0.9**, λ = 0.95), clip 0.2, standard defaults, checked by hand (no Optuna over PPO). Checkpoint = best greedy val MSE on stopped graphs under the frozen predictor. (γ was first 1; changed 2026-11-21, see below.) |
-| Final GNN | Fresh GATv2 trained on **agent-stopped graphs** (one per subject, at its own STOP point) of all train subjects, same Optuna setup as top-K. Test is reported once. |
+| Final GNN | Fresh GATv2 trained on **agent-stopped graphs** (one per subject, at its own STOP point) of all train subjects. Fixed architecture by default, or the same Optuna setup as top-K with `rl.gnn_tuning: optuna` (same switch as the predictor). Test is reported once. |
 | Scope | FC55 × {GF, DSST} |
 
 Stages / CLIs (outputs in `{output_dir}/{FC}/{TEST}/{predictor,agent,final}/`, output_dir `/scratch/bng/cartbind/data/RL_outputs/rl_ppo`):
-1. `rl/predictor.py`: Optuna mask-augmented GATv2 on half A
+1. `rl/predictor.py`: mask-augmented GATv2 on half A (fixed or Optuna)
 2. `rl/train_agent.py`: PPO on half B
-3. `rl/final_gnn.py`: greedy masks for every subject → Optuna final GATv2
+3. `rl/final_gnn.py`: greedy masks for every subject → final GATv2 (fixed or Optuna)
 4. `rl/summarize.py`: RL vs top-K plot, keep-fraction histogram, edge/network retention
 
 Risks: the agent may learn to STOP at once (a valid finding, but no sparse graphs). The agent may exploit predictor quirks (mitigated by the A/B split, random-mask training and the retrained final GNN). Per-subject signal is weak.
 
 ## RL status
 - [x] `rl/` package + `configs/rl.yaml` + tests (2026-11-21). 70 fast tests pass, plus the slow toy test (`pytest -m slow`). The 2 failures that remain were there before: `test_tuning.py::test_base_config_inheritance` and `test_topk_optuna_pipeline.py::test_optuna_sweep_end_to_end` still expect the old `configs/topk_optuna.yaml` scope (`keep_fracs`, `masks: [personal, shared]`) from before commit 303c8cf.
+- [x] Fixed-architecture GNN option for stages 1 and 3, made the default (2026-11-23, see below). 74 fast tests pass locally (`~/miniconda3/bin/python -m pytest tests`)
+- [x] Timing of the whole run and of each component (2026-11-23, see below). 77 fast tests pass
 - [ ] Cluster smoke test (`--max-subjects 2000`), checking GPU memory and time per iteration
 - [ ] FC55 × GF, then DSST
+
+## Change (2026-11-23): timing of the whole RL run and of each component (user request)
+- New `rl/timing.py`: `StageTimer` keeps `{stage_dir}/timing.json` = `{sections: {name: minutes}, total_minutes, sessions, started_at, finished_at}`. It is rewritten after every section and **accumulates across resumed sessions** (a resume adds to the previous times; `sessions` counts invocations). On CUDA it synchronizes before reading the clock. `--overwrite` deletes it with the other stage files.
+- Sections: predictor `load_data`, `gnn_training` (fixed run or whole Optuna study), `eval_by_level`; agent `load_data`, `load_predictor`, `setup`, `ppo_rollout`, `ppo_update`, `ppo_eval` (periodic greedy evals + checkpoint), `final_eval`; final `load_data`, `load_models`, `prune_all`, `gnn_training`.
+- PPO per-iteration times: `log.csv` gains `rollout_seconds` / `update_seconds`, `evals.csv` gains `eval_seconds`. They are added to the timer at each checkpoint, in step with `last.pt`, so iterations a resume redoes are counted once.
+- Each stage's `metrics.json` gets `time_<section>_min`, `time_total_min`, `time_sessions` (old `study_minutes` / `minutes` kept). `final/metrics.json` (and `results.csv`) also gets `predictor_minutes`, `agent_minutes`, `final_minutes`, **`pipeline_minutes_total`** (their sum) and `pipeline_started_at` / `pipeline_finished_at` (wall-clock span, includes queue gaps between jobs).
+- `rl/summarize.py` writes `summary/timing.csv` (long format: fc, test, stage, component, minutes; a `total` row per stage and a `pipeline/total` row), for any FC × test with at least one timed stage, and prints minutes per stage.
+- Not timed: the summary step itself, and time between stages/jobs (only visible via the start/finish timestamps).
+- Helper `rl/setup.py:pipeline_stage_dirs`. Tests: new `tests/test_rl_timing.py`; `test_rl_pipeline.py` checks timing.json per stage, resumed agent `sessions == 2`, `ppo_rollout` = summed `rollout_seconds`, pipeline total = sum of stage totals, and `timing.csv`.
+
+## Change (2026-11-23): fixed GNN architecture by default, Optuna optional (user request)
+- New key **`rl.gnn_tuning: fixed | optuna`** (default `fixed`) in `configs/rl.yaml`. One switch covers the reward predictor (stage 1) and the final GNN (stage 3).
+  - `fixed`: one GATv2 trained with `cfg['model']` / `cfg['training']`, seed `rl.seed`, the same `MaskedLoader`s and early stopping on val MSE. Writes `model.pt`, `losses.csv`, `test_predictions.csv`, `best_trial.json` (`trial_number: null`) and `config.yaml`; no `study.db`/plots. `--n-trials` is ignored (with a note). An unfinished run simply retrains.
+  - `optuna`: the previous behaviour, unchanged (`--set rl.gnn_tuning=optuna`).
+- Fixed architecture = the `configs/topk_gat.yaml` values, so the RL GNNs match the fixed top-K GATv2 baseline. `rl.yaml` now lists the full `model:` / `training:` blocks explicitly (merged values unchanged; checked equal to `topk_gat.yaml`). Base stays `topk_gat_optuna.yaml` so the `optuna:` block is still there.
+- `paths.topk_results` is now `{fixed: .../topk_gat/results.csv, optuna: .../topk_gat_optuna/results.csv}`; `rl/summarize.py:topk_results_path` picks the entry for `rl.gnn_tuning` (a plain string still works). The fixed top-K sweep has 10 seeds; the plot already averages over seeds.
+- Code: `rl/study.py` gains `gnn_tuning_mode`, `run_fixed_training` and `train_stage_gnn` (dispatch); `rl/predictor.py` / `rl/final_gnn.py` call `train_stage_gnn`. Metrics rows keep the same keys (`best_trial` is `None`, `n_trials_complete` 1 in fixed mode).
+- Tests: the end-to-end pipeline now runs in fixed mode (asserts no `study.db`); new `test_rl_predictor_optuna_mode` and `test_topk_results_path_follows_gnn_tuning`.
 
 ## Change (2026-11-22): demographics at the policy heads, not on every node (user decision)
 - Before: projected demographics (and t) were concatenated onto every node's input in both the actor and critic trunks, and again at readout.
@@ -355,9 +375,10 @@ Risks: the agent may learn to STOP at once (a valid finding, but no sparse graph
 
 ## RL usage
 ```bash
-python rl/predictor.py   --tests GF --max-subjects 2000 --n-trials 3 --max-epochs 5     # smoke, stage 1
+python rl/predictor.py   --tests GF --max-subjects 2000 --max-epochs 5                  # smoke, stage 1 (fixed GATv2)
 python rl/train_agent.py --tests GF --max-subjects 2000 --iterations 20                  # smoke, stage 2
-python rl/final_gnn.py   --tests GF --max-subjects 2000 --n-trials 3 --max-epochs 5     # smoke, stage 3 (+ summary)
+python rl/final_gnn.py   --tests GF --max-subjects 2000 --max-epochs 5                  # smoke, stage 3 (+ summary)
+python rl/predictor.py   --tests GF --set rl.gnn_tuning=optuna --n-trials 3              # Optuna instead (same for final_gnn.py)
 python rl/predictor.py --tests GF && python rl/train_agent.py --tests GF && python rl/final_gnn.py --tests GF   # full
 python rl/summarize.py                                                                    # re-summarize by hand
 pytest tests && pytest -m slow                                                            # unit/pipeline + toy learning check

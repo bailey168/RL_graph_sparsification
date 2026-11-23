@@ -5,9 +5,10 @@ clipped PPO update. Every `eval_every` iterations the greedy agent is evaluated 
 half-B subset, for the train/val gap); the checkpoint with the lowest val MSE on agent-stopped graphs (frozen predictor,
 scaled target) is kept, and training stops after `patience` evaluations without improvement.
 
-Output in {output_dir}/{FC}/{TEST}/agent/: log.csv (per iteration), evals.csv (greedy evaluations), best.pt (policy),
-last.pt (resume state), config.yaml, plots/learning_curves.png, metrics.json (written last; val/test frozen-predictor
-metrics of the best agent). A run without metrics.json resumes from last.pt.
+Output in {output_dir}/{FC}/{TEST}/agent/: log.csv (per iteration, incl. rollout/update seconds), evals.csv (greedy
+evaluations, incl. eval seconds), best.pt (policy), last.pt (resume state), config.yaml, plots/learning_curves.png,
+timing.json (minutes per component, accumulated across resumes), metrics.json (written last; val/test
+frozen-predictor metrics of the best agent, plus time_*_min). A run without metrics.json resumes from last.pt.
 
 Example:
     python rl/train_agent.py --tests GF --max-subjects 2000 --iterations 20
@@ -37,9 +38,10 @@ from rl.ppo import collect_rollout, greedy_metrics, ppo_update, run_greedy
 from rl.predictor import clear_stage
 from rl.setup import base_parser, get_device, load_cli_config, load_rl_data, stage_dir
 from rl.study import load_trained_gnn
+from rl.timing import TIMING_FILE, StageTimer
 from topk.run_sweep import append_row, free_memory, write_json
 
-AGENT_FILES = ('metrics.json', 'best.pt', 'last.pt', 'log.csv', 'evals.csv')
+AGENT_FILES = ('metrics.json', 'best.pt', 'last.pt', 'log.csv', 'evals.csv', TIMING_FILE)
 
 
 def build_policy(cfg, data, device):
@@ -100,10 +102,11 @@ def plot_learning_curves(agent_dir):
     plt.close(fig)
 
 
-def train_agent(cfg, fc_type, test, data, predictor, agent_dir, device, iterations):
+def train_agent(cfg, fc_type, test, data, predictor, agent_dir, device, iterations, timer):
     rl_cfg, ppo_cfg = cfg['rl'], cfg['rl']['ppo']
     seed, n_steps = rl_cfg['seed'], rl_cfg['n_steps']
     os.makedirs(agent_dir, exist_ok=True)
+    setup_start = time.perf_counter()
     with open(os.path.join(agent_dir, 'config.yaml'), 'w') as f:
         yaml.safe_dump(snapshot(cfg, fc=fc_type, test=test, stage='agent'), f, sort_keys=False)
 
@@ -132,16 +135,26 @@ def train_agent(cfg, fc_type, test, data, predictor, agent_dir, device, iteratio
         truncate_csv(log_path, state['iteration'])
         truncate_csv(evals_path, state['iteration'])
         print(f"  Resuming from iteration {state['iteration']} (best val MSE {state['best_val_mse']:.4f})")
+    timer.add('setup', time.perf_counter() - setup_start)
 
     start = time.time()
     batch_size = ppo_cfg['eval_batch_size']
+    pending = {'ppo_rollout': 0.0, 'ppo_update': 0.0}   # added to the timer at each checkpoint, in step with last.pt
     for it in range(state['iteration'] + 1, iterations + 1):
-        t0 = time.time()
+        timer.sync()
+        t0 = time.perf_counter()
         idx = torch.randperm(len(agent_set), generator=cpu_gen)[:ppo_cfg['subjects_per_iter']].to(device)
         subjects = agent_set.subset(idx)
         roll = collect_rollout(policy, env, subjects, dev_gen, ppo_cfg['gamma'], ppo_cfg['gae_lambda'])
+        timer.sync()
+        t1 = time.perf_counter()
         stats = ppo_update(policy, optimizer, roll, subjects, ppo_cfg, cpu_gen)
-        append_row(log_path, {'iteration': it, **roll.stats, **stats, 'seconds': time.time() - t0})
+        timer.sync()
+        t2 = time.perf_counter()
+        pending['ppo_rollout'] += t1 - t0
+        pending['ppo_update'] += t2 - t1
+        append_row(log_path, {'iteration': it, **roll.stats, **stats, 'seconds': t2 - t0,
+                              'rollout_seconds': t1 - t0, 'update_seconds': t2 - t1})
 
         if it % ppo_cfg['eval_every'] == 0 or it == iterations:
             val = greedy_metrics(run_greedy(policy, env, val_set, batch_size), val_set, y_pre, data.num_edges, 'val_')
@@ -154,9 +167,14 @@ def train_agent(cfg, fc_type, test, data, predictor, agent_dir, device, iteratio
             else:
                 state['evals_since_best'] += 1
             state['iteration'] = it
-            append_row(evals_path, {'iteration': it, **val, **tr, 'best': improved})
             torch.save({'policy': policy.state_dict(), 'optimizer': optimizer.state_dict(), 'state': state,
                         'cpu_gen': cpu_gen.get_state(), 'dev_gen': dev_gen.get_state()}, last_path)
+            eval_seconds = time.perf_counter() - t2
+            append_row(evals_path, {'iteration': it, **val, **tr, 'best': improved, 'eval_seconds': eval_seconds})
+            for name, seconds in pending.items():
+                timer.add(name, seconds, save=False)
+            timer.add('ppo_eval', eval_seconds)
+            pending = dict.fromkeys(pending, 0.0)
             print(f"  it {it}: return={roll.stats['return_mean']:.4f} keep={roll.stats['keep_frac_mean']:.2f} | "
                   f"greedy val MSE={val['val_mse']:.4f} (full {val['val_mse_full']:.4f}) "
                   f"R²={val['val_r2']:.4f} keep={val['val_keep_frac_mean']:.2f} | half B MSE={tr['train_mse']:.4f}"
@@ -165,15 +183,17 @@ def train_agent(cfg, fc_type, test, data, predictor, agent_dir, device, iteratio
                 print(f"  Early stop: no val improvement in {ppo_cfg['patience']} evaluations")
                 break
 
-    plot_learning_curves(agent_dir)
-    policy = load_agent(cfg, data, agent_dir, device)
-    metrics = {}
-    for name in ('val', 'test'):
-        metrics.update(greedy_metrics(run_greedy(policy, env, data.sets[name], batch_size), data.sets[name], y_pre,
-                                      data.num_edges, f'{name}_'))
+    with timer.section('final_eval'):
+        plot_learning_curves(agent_dir)
+        policy = load_agent(cfg, data, agent_dir, device)
+        metrics = {}
+        for name in ('val', 'test'):
+            metrics.update(greedy_metrics(run_greedy(policy, env, data.sets[name], batch_size), data.sets[name],
+                                          y_pre, data.num_edges, f'{name}_'))
+    timer.finish()
     row = {'fc': fc_type, 'test': test, 'stage': 'agent', 'best_iteration': state['best_iteration'],
            'iterations_run': state['iteration'], 'n_agent': len(agent_set), 'minutes': (time.time() - start) / 60,
-           **metrics}
+           **metrics, **timer.flat()}
     write_json(os.path.join(agent_dir, 'metrics.json'), row)   # written last: marks the stage as complete
     return row
 
@@ -198,12 +218,16 @@ def main():
                 continue
             print(f"\n=== {fc_type} | {test} | PPO agent ===")
             try:
-                data = load_rl_data(cfg, test, fc_type, device, args.max_subjects, save=False)
-                predictor = load_frozen_predictor(cfg, fc_type, test, data, device)
-                row = train_agent(cfg, fc_type, test, data, predictor, agent_dir, device, iterations)
+                timer = StageTimer(agent_dir, device)
+                with timer.section('load_data'):
+                    data = load_rl_data(cfg, test, fc_type, device, args.max_subjects, save=False)
+                with timer.section('load_predictor'):
+                    predictor = load_frozen_predictor(cfg, fc_type, test, data, device)
+                row = train_agent(cfg, fc_type, test, data, predictor, agent_dir, device, iterations, timer)
                 print(f"  best iteration {row['best_iteration']}: test MSE={row['test_mse']:.4f} "
                       f"(full {row['test_mse_full']:.4f}) R²={row['test_r2']:.4f} (full {row['test_r2_full']:.4f}) "
-                      f"keep={row['test_keep_frac_mean']:.2f}±{row['test_keep_frac_sd']:.2f}")
+                      f"keep={row['test_keep_frac_mean']:.2f}±{row['test_keep_frac_sd']:.2f} | "
+                      f"{row['time_total_min']:.1f} min")
             except Exception:
                 traceback.print_exc()
                 failed = True

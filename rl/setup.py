@@ -67,6 +67,11 @@ def stage_dir(cfg, fc_type, test, stage=None):
     return path if stage is None else os.path.join(path, stage)
 
 
+def pipeline_stage_dirs(cfg, fc_type, test):
+    """{stage: dir} for the three trained stages, in pipeline order (used for timing)."""
+    return {stage: stage_dir(cfg, fc_type, test, stage) for stage in ('predictor', 'agent', 'final')}
+
+
 def split_halves(n_train, agent_frac, seed):
     """Positions (within the train split) of half A (predictor) and half B (agent)."""
     perm = np.random.default_rng(seed).permutation(n_train)

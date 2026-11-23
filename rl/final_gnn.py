@@ -1,16 +1,19 @@
 """Stage 3: prune every subject with the trained agent, then train the final GATv2 on the agent-stopped graphs.
 
 The best stage-2 agent prunes each train (A+B), val and test subject greedily until it STOPs (or reaches 0 edges).
-A fresh GATv2 is then tuned with the same Optuna setup as the top-K sweep (search space, trials, seed, TPE), trained on
-the train subjects' stopped graphs, selected on val MSE and evaluated once on test. Each subject has its own sparsity.
+A fresh GATv2 is then trained on the train subjects' stopped graphs, early-stopped on val MSE and evaluated once on
+test. Each subject has its own sparsity. rl.gnn_tuning: 'fixed' (default) uses the model / training blocks of
+configs/rl.yaml; 'optuna' tunes it with the same Optuna setup as the top-K sweep (search space, trials, seed, TPE).
 
 Output in {output_dir}/{FC}/{TEST}/final/:
   stopped_masks_{split}.npy (n, E) bool   removal_step_{split}.npy (n, E) int8 (-1 = kept)   stop_step_{split}.npy
-  eids_{split}.npy   Optuna outputs (study.db, trials.csv, model.pt, config.yaml, losses.csv, test_predictions.csv, ...)
-  metrics.json (written last). Also appends a row to {output_dir}/results.csv, then runs rl/summarize.py.
+  eids_{split}.npy   model.pt, config.yaml, losses.csv, test_predictions.csv, best_trial.json
+  (+ study.db, trials.csv, best_params.json, plots/ with Optuna)   timing.json (minutes per component)
+  metrics.json (written last; includes time_*_min, {predictor,agent,final}_minutes and pipeline_minutes_total, the
+  whole run's compute time summed from the three stages' timing.json). Also appends a row to {output_dir}/results.csv, then runs rl/summarize.py.
 
 Example:
-    python rl/final_gnn.py --tests GF --max-subjects 2000 --n-trials 3 --max-epochs 5
+    python rl/final_gnn.py --tests GF --max-subjects 2000 --max-epochs 5
 """
 import os
 import sys
@@ -28,10 +31,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from rl.env import PruningEnv
 from rl.ppo import greedy_metrics, run_greedy
 from rl.predictor import STUDY_FILES, clear_stage
-from rl.setup import SPLITS, base_parser, get_device, load_cli_config, load_rl_data, stage_dir
-from rl.study import run_masked_study
+from rl.setup import (SPLITS, base_parser, get_device, load_cli_config, load_rl_data, pipeline_stage_dirs,
+                      stage_dir)
+from rl.study import gnn_tuning_mode, train_stage_gnn
 from rl.summarize import auto_summarize
 from rl.train_agent import load_agent, load_frozen_predictor
+from rl.timing import StageTimer, pipeline_timing
 from topk.run_sweep import append_row, free_memory, write_json
 
 
@@ -51,19 +56,23 @@ def prune_all(cfg, data, predictor, policy, out_dir):
     return masks, metrics
 
 
-def run_final(cfg, fc_type, test, data, out_dir, device, n_trials):
+def run_final(cfg, fc_type, test, data, out_dir, device, n_trials, timer):
     os.makedirs(out_dir, exist_ok=True)
-    predictor = load_frozen_predictor(cfg, fc_type, test, data, device)
     agent_dir = stage_dir(cfg, fc_type, test, 'agent')
     if not os.path.exists(os.path.join(agent_dir, 'metrics.json')):
         raise FileNotFoundError(f"Run rl/train_agent.py first (no {agent_dir}/metrics.json)")
-    policy = load_agent(cfg, data, agent_dir, device)
-    masks, predictor_metrics = prune_all(cfg, data, predictor, policy, out_dir)
+    with timer.section('load_models'):
+        predictor = load_frozen_predictor(cfg, fc_type, test, data, device)
+        policy = load_agent(cfg, data, agent_dir, device)
+    with timer.section('prune_all'):
+        masks, predictor_metrics = prune_all(cfg, data, predictor, policy, out_dir)
     del predictor, policy
     free_memory()
 
     sets = {name: data.sets[name] for name in SPLITS}
-    res = run_masked_study(cfg, out_dir, f"{fc_type}|{test}|final", data, sets, masks, device, n_trials)
+    with timer.section('gnn_training'):
+        res = train_stage_gnn(cfg, out_dir, f"{fc_type}|{test}|final", data, sets, masks, device, n_trials)
+    timer.finish()
     saved = res['saved']
     keep = {name: masks[name].sum(1).float() / data.num_edges for name in SPLITS}
     row = {'fc': fc_type, 'test': test, 'stage': 'final',
@@ -75,14 +84,15 @@ def run_final(cfg, fc_type, test, data, out_dir, device, n_trials):
            'n_trials_complete': res['states']['complete'], 'n_pruned': res['states']['pruned'],
            'n_failed': res['states']['failed'], 'study_minutes': res['study_minutes'],
            **{k: saved[k] for k in saved if k.split('_')[0] in SPLITS},
-           **predictor_metrics, **res['best_values']}
+           **predictor_metrics, **res['best_values'], **timer.flat(),
+           **pipeline_timing(pipeline_stage_dirs(cfg, fc_type, test))}
     write_json(os.path.join(out_dir, 'metrics.json'), row)   # written last: marks the stage as complete
     return row
 
 
 def main():
     parser = base_parser("Stage 3: final GATv2 on agent-stopped graphs")
-    parser.add_argument('--n-trials', type=int, help='Override optuna.n_trials')
+    parser.add_argument('--n-trials', type=int, help='Override optuna.n_trials (rl.gnn_tuning=optuna only)')
     parser.add_argument('--max-epochs', type=int, help='Override training.max_epochs')
     parser.add_argument('--no-summary', action='store_true', help="Don't run rl/summarize.py at the end")
     args = parser.parse_args()
@@ -92,7 +102,12 @@ def main():
     n_trials = args.n_trials or cfg['optuna']['n_trials']
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     device = get_device()
-    print(f"Using device: {device} | {n_trials} trials")
+    if gnn_tuning_mode(cfg) == 'fixed':
+        if args.n_trials is not None:
+            print("Note: --n-trials is ignored with rl.gnn_tuning=fixed")
+        print(f"Using device: {device} | fixed GNN architecture (rl.gnn_tuning=fixed)")
+    else:
+        print(f"Using device: {device} | Optuna, {n_trials} trials")
     results_path = os.path.join(cfg['paths']['output_dir'], 'results.csv')
 
     failed = False
@@ -106,12 +121,16 @@ def main():
                 continue
             print(f"\n=== {fc_type} | {test} | final GNN on agent-stopped graphs ===")
             try:
-                data = load_rl_data(cfg, test, fc_type, device, args.max_subjects, save=False)
-                row = run_final(cfg, fc_type, test, data, out_dir, device, n_trials)
+                timer = StageTimer(out_dir, device)
+                with timer.section('load_data'):
+                    data = load_rl_data(cfg, test, fc_type, device, args.max_subjects, save=False)
+                row = run_final(cfg, fc_type, test, data, out_dir, device, n_trials, timer)
                 append_row(results_path, row)
                 print(f"  test R²={row['test_r2']:.4f} R²corr={row['test_r2_corr']:.4f} | "
                       f"edges kept {row['test_keep_frac_mean']:.2f}±{row['test_keep_frac_sd']:.2f} | "
                       f"frozen predictor test R²={row['predictor_test_r2']:.4f}")
+                print(f"  minutes: predictor {row['predictor_minutes'] or 0:.1f} + agent {row['agent_minutes'] or 0:.1f}"
+                      f" + final {row['final_minutes']:.1f} = {row['pipeline_minutes_total']:.1f} total")
             except Exception:
                 traceback.print_exc()
                 failed = True
