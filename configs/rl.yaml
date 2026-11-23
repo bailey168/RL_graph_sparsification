@@ -22,7 +22,7 @@ rl:
 
   policy:
     embedding_dim: 16     # node-ID embedding
-    demo_embed_dim: 8     # projected demographics, concatenated onto every node and at readout
+    demo_embed_dim: 8     # projected demographics, fed to the STOP, edge-scoring and value heads (not node features)
     hidden_channels: 32
     heads: 2              # GATv2 heads (averaged)
     gnn_num_layers: 2

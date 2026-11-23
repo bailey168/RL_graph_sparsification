@@ -1,11 +1,13 @@
 """PPO actor-critic for iterative edge pruning.
 
 State: the current pruned graph (kept edges carrying z-scored FC values), the step t and the subject's demographics.
-Each trunk (actor, critic) embeds node IDs, concatenates projected demographics and t/n_steps onto every node, and runs
-GATv2 layers over the kept edges (edge value as a 1-d edge_attr).
+Each trunk (actor, critic) embeds node IDs and runs GATv2 layers over the kept edges (edge value as a 1-d edge_attr).
+Demographics and t/n_steps are NOT node features: each trunk builds a per-subject context [projected demo, t/n_steps]
+that is used only at the heads (both are one global value per subject, so message passing adds nothing).
 
 Action: STOP, or remove m edges (m = the next 5% of the original edges). The actor gives a STOP logit (pooled graph
-embedding ⊕ demographics ⊕ t) and a removal logit per kept edge (symmetric MLP of [h_i + h_j, h_i ⊙ h_j, w_ij]).
+embedding ⊕ context) and a removal logit per kept edge (symmetric MLP of [h_i + h_j, h_i ⊙ h_j, w_ij, context]).
+The critic's value head sees its own pooled graph embedding ⊕ context.
 The m edges are drawn without replacement from a Plackett–Luce distribution over the removal logits (Gumbel-top-m),
 and the log-probability of the ordered draw is the PPO surrogate:
     log π = log(1 - p_stop) + Σ_j [s_(j) - logsumexp(s over kept edges not yet drawn)],   or log p_stop for STOP.
@@ -26,7 +28,8 @@ NEG = -1e9   # logit for edges that cannot be removed (finite, so no NaN gradien
 
 
 class Trunk(nn.Module):
-    """Node-ID embedding ⊕ context -> GATv2 stack (LayerNorm, ELU) -> node embeddings and attention-pooled graph."""
+    """Node-ID embedding -> GATv2 stack (LayerNorm, ELU) -> node embeddings, attention-pooled graph and the
+    head-only context [projected demographics, t]."""
 
     def __init__(self, num_nodes, demo_dim, embedding_dim, demo_embed_dim, hidden_channels, heads, gnn_num_layers):
         super().__init__()
@@ -34,7 +37,7 @@ class Trunk(nn.Module):
         self.node_embedding = nn.Embedding(num_nodes, embedding_dim)
         nn.init.normal_(self.node_embedding.weight, std=0.1)
         self.demo_projection = nn.Linear(demo_dim, demo_embed_dim)
-        in_dim = embedding_dim + demo_embed_dim + 1
+        in_dim = embedding_dim   # node ID only (demographics and t go to the heads)
         self.convs = nn.ModuleList([
             GATv2Conv(in_dim if i == 0 else hidden_channels, hidden_channels, heads=heads, concat=False, edge_dim=1,
                       residual=True, add_self_loops=True, fill_value='mean')
@@ -48,8 +51,7 @@ class Trunk(nn.Module):
         """Returns node embeddings (B, N, H), graph embedding (B, H) and context [demo, t_frac] (B, De + 1)."""
         B, N = mask.shape[0], self.num_nodes
         context = torch.cat([self.demo_projection(demo), t_frac.unsqueeze(1)], dim=1)
-        x = torch.cat([self.node_embedding.weight.expand(B, N, -1), context.unsqueeze(1).expand(B, N, -1)], dim=2)
-        x = x.reshape(B * N, -1)
+        x = self.node_embedding.weight.expand(B, N, -1).reshape(B * N, -1)
         g = masked_batch(edge_vals, mask, edge_list, N, demo)
         for conv, norm in zip(self.convs, self.norms):
             x = F.elu(norm(conv(x, g.edge_index, edge_attr=g.edge_attr)))
@@ -112,7 +114,7 @@ class ActorCritic(nn.Module):
                               c['heads'], c['gnn_num_layers'])
         self.actor, self.critic = trunk(), trunk()
         H, ctx = c['hidden_channels'], self.actor.context_dim
-        self.edge_head = mlp(2 * H + 1, c['mlp_hidden'], layers=3)
+        self.edge_head = mlp(2 * H + 1 + ctx, c['mlp_hidden'], layers=3)
         self.stop_head = mlp(H + ctx, c['mlp_hidden'])
         self.value_head = mlp(H + ctx, c['mlp_hidden'])
         p0 = c['init_stop_prob']
@@ -130,7 +132,7 @@ class ActorCritic(nn.Module):
         h, g, context = self.actor(edge_vals, mask, self._t_frac(t, B, mask.device), demo, self.edge_list)
         b, e = mask.nonzero(as_tuple=True)
         hi, hj = h[b, self.edge_list[e, 0]], h[b, self.edge_list[e, 1]]
-        scores = self.edge_head(torch.cat([hi + hj, hi * hj, edge_vals[b, e].unsqueeze(1)], dim=1)).squeeze(1)
+        scores = self.edge_head(torch.cat([hi + hj, hi * hj, edge_vals[b, e].unsqueeze(1), context[b]], dim=1)).squeeze(1)
         logits = edge_vals.new_full(mask.shape, NEG).index_put((b, e), scores)
         return logits, self.stop_head(torch.cat([g, context], dim=1)).squeeze(1)
 
